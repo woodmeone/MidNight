@@ -129,5 +129,5 @@ skills/recall/
 
 ## 参考资料
 
-- 设计受 VCP(VCPToolBox) 的 TagMemo 算法和联想记忆理念启发，但代码全部原创实现
-- 法律隔离：不复制 VCP 代码、不引用 VCP 品牌（详见 `docs/adr/0001-original-implementation.md`）
+- 设计受 VCP(VCPToolBox) 的 TagMemo 算法和联想记忆理念启发
+- 许可证：CC BY-NC-SA 4.0（详见根目录 LICENSE）

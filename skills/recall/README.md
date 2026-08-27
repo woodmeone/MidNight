@@ -75,4 +75,4 @@ python -m pytest tests/   # 40 个测试
 
 ## 许可证
 
-MIT（本项目为原创代码，不包含 VCP 的任何代码或品牌）
+CC BY-NC-SA 4.0（非商业使用，详见根目录 LICENSE）

@@ -5,7 +5,7 @@ Midnight Skills 是一组受 VCP(设计思想) 启发但完全原创的原子化
 
 ## 关键限制（违反即项目失败）
 
-1. **不复制 VCP 代码**（ADR-0001）：`scripts/` 全部原创实现，不摘抄 VCPToolBox 的任何函数。
+1. **原创实现**（ADR-0001）：`scripts/` 全部原创，不摘抄 VCPToolBox 的任何函数。
 2. **不引用 VCP 品牌**：命名、README、文档中不得出现 "VCP" 作为品牌前缀。
 3. **完全自包含**：不依赖 VCPToolBox 进程或服务器，任何环境可跑。
 

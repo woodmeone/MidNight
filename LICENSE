@@ -1,21 +1,23 @@
-MIT License
+# Midnight Skills License
+
+Midnight Skills 采用 **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International** (CC BY-NC-SA 4.0) 许可。
+
+## 你可以
+
+- **共享** — 在任何媒介以任何形式复制、发行本作品
+- **演绎** — 修改、转换或以本作品为基础进行创作
+
+## 但必须遵守以下条款
+
+- **署名 (BY)** — 你必须给出适当的署名，提供指向本许可的链接，同时标明是否对原始作品作了修改。可以用任何合理的方式，但不得以任何方式暗示许可人认可你或你的使用。
+- **非商业性使用 (NC)** — 你不得将本作品用于商业目的。
+- **相同方式共享 (SA)** — 如果你基于本作品进行修改、转换或创作，你必须使用与原始作品相同的许可协议发布你的贡献。
+
+## 完整许可文本
+
+完整的 CC BY-NC-SA 4.0 法律文本见：
+https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+---
 
 Copyright (c) 2026 bit blanket
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
