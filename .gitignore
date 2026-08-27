@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# pytest
+.pytest_cache/
+
+# 运行时数据
+~/.midnight/
+.midnight/
+
+# 本地配置
+config.env
+.env
+
+# 系统
+.DS_Store
+Thumbs.db
