@@ -13,7 +13,9 @@ import sys
 from datetime import datetime
 from typing import Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from schema 可用
+sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 
 from schema import init_db  # noqa: E402
 from scripts.config import get_db_path, get_dailynote_path, ensure_agent_dir  # noqa: E402

@@ -13,6 +13,10 @@ import sqlite3
 import struct
 from typing import Optional
 
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from embedding 可用
+sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
+
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.midnight/compass/config.json")
 DEFAULT_DB_PATH = os.path.expanduser("~/.midnight/compass/compass.db")
 
@@ -151,7 +155,7 @@ def main(argv=None) -> int:
         print("Usage: route.py --query '...' [--preset NAME] [--config PATH]", file=sys.stderr)
         return 1
 
-    from scripts.embedding import FakeEmbeddingClient
+    from embedding import FakeEmbeddingClient
     client = FakeEmbeddingClient(dimension=16)
     result = route(query, client, config_path=config_path, preset_name=preset_name)
     print(json.dumps(result, ensure_ascii=False, indent=2))

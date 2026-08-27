@@ -14,7 +14,9 @@ import os
 import sys
 import sqlite3
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from config 可用
+sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 from scripts.config import get_db_path  # noqa: E402
 
 

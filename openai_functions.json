@@ -1,0 +1,221 @@
+{
+  "name": "midnight-skills",
+  "description": "给 AI 装上持久记忆和生命：recall(联想记忆)、core(跨端时间线)、pulse(自主心跳)、compass(语义路由)。OpenAI function calling 兼容定义。",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "recall_ingest",
+        "description": "把日记目录中的新文件向量化入库。Agent 先写日记文件到 ~/.midnight/recall/<agent>/dailynote/，再调用此工具让 AI 拥有记忆。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "agent": {
+              "type": "string",
+              "description": "智能体名（默认 default）",
+              "default": "default"
+            },
+            "diary_dir": {
+              "type": "string",
+              "description": "日记目录（可选，默认用 agent 的默认目录）",
+              "default": ""
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "recall_search",
+        "description": "根据当前话题召回相关记忆，支持联想（共现脉冲传播）、时间加权、多智能体物理隔离。返回可注入上下文的记忆片段。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "当前话题或查询"
+            },
+            "agent": {
+              "type": "string",
+              "description": "智能体名",
+              "default": "default"
+            },
+            "k": {
+              "type": "integer",
+              "description": "召回数量",
+              "default": 10
+            },
+            "tag_weight": {
+              "type": "number",
+              "description": "联想权重（0=不联想）",
+              "default": 0.3
+            },
+            "time_ratio": {
+              "type": "number",
+              "description": "时间权重",
+              "default": 0.2
+            },
+            "truncate": {
+              "type": "number",
+              "description": "截断比例 (0-1)",
+              "default": 1.0
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "recall_auto",
+        "description": "自动判断查询属于哪个智能体（语义匹配 agent 描述），再在该智能体的记忆库中召回。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "查询内容"
+            },
+            "k": {
+              "type": "integer",
+              "description": "召回数量",
+              "default": 10
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "core_append",
+        "description": "把一条消息追加到跨端时间线，带会话名、来源、角色。用于跨会话共享上下文。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string",
+              "description": "消息内容"
+            },
+            "session_id": {
+              "type": "string",
+              "description": "会话名",
+              "default": "default"
+            },
+            "source": {
+              "type": "string",
+              "description": "来源（如 web/mobile/desktop）",
+              "default": "unknown"
+            },
+            "role": {
+              "type": "string",
+              "enum": ["user", "assistant", "system"],
+              "description": "消息角色",
+              "default": "user"
+            }
+          },
+          "required": ["content"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "core_timeline",
+        "description": "获取其他会话的最近消息，跨端补充上下文。自动排除当前会话。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "description": "当前会话名（自动排除）",
+              "default": ""
+            },
+            "limit": {
+              "type": "integer",
+              "description": "返回条数",
+              "default": 10
+            },
+            "hours": {
+              "type": "integer",
+              "description": "最近多少小时",
+              "default": 24
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "pulse_loop",
+        "description": "启动自主心跳循环：AI 自己输出 [[Pulse::Start/Next/Complete]] 指令，脚本负责定时唤醒继续执行，直到任务完成或达到轮数上限。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "任务提示词"
+            },
+            "system_prompt": {
+              "type": "string",
+              "description": "系统提示词",
+              "default": ""
+            },
+            "api_url": {
+              "type": "string",
+              "description": "模型 API 地址",
+              "default": ""
+            },
+            "api_key": {
+              "type": "string",
+              "description": "模型 API key",
+              "default": ""
+            },
+            "model": {
+              "type": "string",
+              "description": "模型名",
+              "default": "deepseek-v4-flash"
+            },
+            "rounds": {
+              "type": "integer",
+              "description": "最大轮数",
+              "default": 15
+            },
+            "timeout": {
+              "type": "integer",
+              "description": "超时秒数",
+              "default": 300
+            }
+          },
+          "required": ["prompt"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "compass_route",
+        "description": "判断当前问题应该用哪个模型：日常闲聊用轻量模型，复杂推理用重量模型。返回推荐模型和备选。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "问题内容"
+            },
+            "preset": {
+              "type": "string",
+              "description": "路由预设名",
+              "default": ""
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    }
+  ]
+}

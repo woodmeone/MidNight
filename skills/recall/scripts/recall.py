@@ -8,7 +8,9 @@ import sqlite3
 import struct
 from typing import Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from embedding 可用
+sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 from embedding import load_embedding_client  # noqa: E402
 from scripts.config import get_db_path, list_agents  # noqa: E402
 
@@ -32,6 +34,11 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 def recall(query: str, db_path: str, embedding_client, k: int = 10) -> list[dict]:
     """Vector similarity search. Returns list of {chunk_id, content, date, score, file_path, importance}."""
+    # Ensure schema exists (open+close so Windows doesn't hold the file lock)
+    from scripts.schema import init_db
+    _init = init_db(db_path)
+    _init.close()
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -254,6 +261,7 @@ def main(argv=None) -> int:
         return 0
 
     db_path = db_path or get_db_path(agent)
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
     results = recall(query, db_path, client, k=k)
     output = format_recall_output(results)
     print(output)

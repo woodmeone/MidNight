@@ -125,8 +125,10 @@ def test_ingest_nonexistent_file(db_path, embed):
 def test_ingest_nonexistent_directory(db_path, embed):
     """不存在的目录应报错"""
     from scripts.ingest import ingest_directory
-    with pytest.raises(FileNotFoundError):
-        ingest_directory("/nonexistent/", db_path, embed)
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        missing = os.path.join(tmpdir, 'does_not_exist')
+        with pytest.raises(FileNotFoundError):
+            ingest_directory(missing, db_path, embed)
 
 
 def test_recall_empty_query(db_path, embed):
@@ -180,9 +182,12 @@ def test_format_recall_output_truncation(embed):
 
 
 def test_recall_missing_db():
-    """不存在的数据库应优雅报错"""
-    with pytest.raises(sqlite3.OperationalError):
-        recall("查询", "/nonexistent/recall.db", FakeEmbeddingClient(4), k=5)
+    """数据库不存在时应自动创建，返回空结果（而不是崩溃）"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        db = os.path.join(tmpdir, 'nested', 'recall.db')
+        results = recall("查询", db, FakeEmbeddingClient(4), k=5)
+        assert results == []
+        assert os.path.exists(db)  # 自动创建了数据库
 
 
 # ============================================================
