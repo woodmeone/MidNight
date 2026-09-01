@@ -2,12 +2,18 @@
 
 Each agent has its own database and diary directory, physically separated.
 Default agent is 'default'. Supports auto-routing via semantic matching.
+
+Base directory is configurable via MIDNIGHT_BASE_DIR (default ~/.midnight).
 """
 import json
 import os
 
 DEFAULT_AGENT = 'default'
-BASE_DIR = os.path.expanduser("~/.midnight/recall")
+DEFAULT_BASE = os.path.expanduser("~/.midnight")
+BASE_DIR = os.path.join(
+    os.environ.get('MIDNIGHT_BASE_DIR', DEFAULT_BASE),
+    'recall'
+)
 
 
 def get_agent_dir(agent: str = None) -> str:

@@ -1,6 +1,7 @@
 """SQLite schema for midnight-core (跨端统一时间线).
 
 One table: messages — stores cross-session messages with source markers.
+Base directory is configurable via MIDNIGHT_BASE_DIR (default ~/.midnight).
 """
 import sqlite3
 import os
@@ -21,7 +22,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source);
 """
 
-DEFAULT_DB_PATH = os.path.expanduser("~/.midnight/core/core.db")
+DEFAULT_DB_PATH = os.path.join(
+    os.environ.get('MIDNIGHT_BASE_DIR', os.path.expanduser("~/.midnight")),
+    'core', 'core.db'
+)
 
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:

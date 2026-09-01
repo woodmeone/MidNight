@@ -17,8 +17,9 @@ _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from embedding 可用
 sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 
-DEFAULT_CONFIG_PATH = os.path.expanduser("~/.midnight/compass/config.json")
-DEFAULT_DB_PATH = os.path.expanduser("~/.midnight/compass/compass.db")
+_MIDNIGHT_BASE = os.environ.get('MIDNIGHT_BASE_DIR', os.path.expanduser("~/.midnight"))
+DEFAULT_CONFIG_PATH = os.path.join(_MIDNIGHT_BASE, 'compass', 'config.json')
+DEFAULT_DB_PATH = os.path.join(_MIDNIGHT_BASE, 'compass', 'compass.db')
 
 DEFAULT_CONFIG = {
     "enabled": True,
