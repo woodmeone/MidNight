@@ -47,11 +47,12 @@ def ensure_agent_dir(agent: str = None) -> str:
 
 
 def list_agents() -> list[dict]:
-    """Scan all agents under BASE_DIR, return list of {name, description, path}.
+    """Scan all agents under BASE_DIR, return list of {name, description, path, keywords}.
 
     Only directories that contain a recall.db or agent.json are treated as agents.
-    Each agent can have an agent.json file with a 'description' field.
-    Agents without agent.json use their name as the description.
+    Each agent can have an agent.json file with 'description' and optional 'keywords'
+    (list of domain words used for keyword-anchored routing). Agents without
+    agent.json use their name as the description.
     """
     agents = []
     if not os.path.exists(BASE_DIR):
@@ -67,18 +68,23 @@ def list_agents() -> list[dict]:
         if not has_db and not has_desc:
             continue
         description = name
+        keywords = []
         if has_desc:
             try:
                 with open(os.path.join(agent_dir, 'agent.json'), 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     if data.get('description'):
                         description = data['description']
+                    kw = data.get('keywords')
+                    if isinstance(kw, list):
+                        keywords = [str(k) for k in kw]
             except (json.JSONDecodeError, OSError):
                 pass
         agents.append({
             'name': name,
             'description': description,
             'path': agent_dir,
+            'keywords': keywords,
         })
     return agents
 

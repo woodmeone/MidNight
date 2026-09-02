@@ -12,7 +12,20 @@ _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from embedding 可用
 sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 from embedding import load_embedding_client  # noqa: E402
-from scripts.config import get_db_path, list_agents  # noqa: E402
+from scripts.config import (  # noqa: E402
+    get_db_path, list_agents, DEFAULT_AGENT,
+)
+
+# 词面锚定阈值：非 default agent 需与查询共享 ≥ 该数量的汉字才算"可信候选"，
+# 防止泛化/情绪化查询（无领域词）被 embedding 相似度误导而路由到某个私人 agent。
+ROUTE_ANCHOR_MIN_SHARED = 2
+
+
+def _agent_chars(agent: dict) -> set:
+    """Agent 的领域字符集：description + keywords 去空格后的字符集合。"""
+    text = agent.get('description') or ''
+    text += ' ' + ' '.join(agent.get('keywords') or [])
+    return {c for c in text if not c.isspace()}
 
 
 def _deserialize_vector(blob: bytes) -> Optional[list[float]]:
@@ -90,36 +103,56 @@ def auto_recall(query: str, embedding_client, k: int = 10,
                 truncate: float = 1.0) -> dict:
     """Auto-route query to the best matching agent, then recall.
 
-    Scans all agents, semantically matches query to each agent's description,
-    picks the best match, and runs recall_associative on that agent's database.
+    Routing is anchored: a non-default agent must share ≥ ROUTE_ANCHOR_MIN_SHARED
+    characters with the query (description + optional keywords) to be a trusted
+    candidate. Generic / emotional queries without domain words therefore fall
+    back to the `default` agent (the user's own memory) instead of a random
+    niche agent — preventing cross-DB leakage of unrelated private memory.
 
-    Returns {agent, description, score, results}
+    Returns {name, description, score, ambiguous, results}
     """
     agents = list_agents()
     if not agents:
-        return {'name': None, 'description': None, 'score': 0, 'results': []}
+        return {'name': None, 'description': None, 'score': 0,
+                'ambiguous': True, 'results': []}
 
     query_vec = embedding_client.embed([query])[0]
+    q_chars = {c for c in query if not c.isspace()}
 
-    # Score each agent's description against the query
+    # Score each agent's description+keywords against the query + lexical anchor
     scored = []
     for agent in agents:
-        desc_vec = embedding_client.embed([agent['description']])[0]
+        route_text = agent['description']
+        if agent.get('keywords'):
+            route_text += ' ' + ' '.join(agent['keywords'])
+        desc_vec = embedding_client.embed([route_text])[0]
         score = cosine_similarity(query_vec, desc_vec)
-        scored.append({**agent, 'score': score})
+        anchor = len(q_chars & _agent_chars(agent))
+        scored.append({**agent, 'score': score, 'anchor': anchor})
 
-    scored.sort(key=lambda x: x['score'], reverse=True)
-    best = scored[0]
+    # 可信候选：default 恒为兜底；非 default 需有词面锚定
+    trusted = [a for a in scored
+               if a['name'] == DEFAULT_AGENT or a['anchor'] >= ROUTE_ANCHOR_MIN_SHARED]
+    if not trusted:
+        # 无 default 也无锚定 agent → 不猜，返回空 + ambiguous
+        return {'name': None, 'description': None, 'score': 0,
+                'ambiguous': True, 'results': []}
+
+    best = max(trusted, key=lambda a: (a['score'], a['anchor']))
+    # ambiguous = 本次靠 default 兜底（没有任何非 default agent 被词面锚定）
+    ambiguous = best['name'] == DEFAULT_AGENT and not any(
+        a['name'] != DEFAULT_AGENT and a['anchor'] >= ROUTE_ANCHOR_MIN_SHARED
+        for a in scored)
 
     # Run recall on the best agent's database
     db_path = get_db_path(best['name'])
     if not os.path.exists(db_path):
-        return {**best, 'results': []}
+        return {**best, 'ambiguous': ambiguous, 'results': []}
 
     results = recall_associative(query, db_path, embedding_client,
                                  k=k, tag_weight=tag_weight,
                                  time_ratio=time_ratio, truncate=truncate)
-    return {**best, 'results': results}
+    return {**best, 'ambiguous': ambiguous, 'results': results}
 
 
 def format_recall_output(results: list[dict], max_chars: int = 200) -> str:

@@ -9,7 +9,7 @@ description: "让 AI 拥有长期记忆——自动写日记、联想式召回�
 
 ## 核心能力
 
-1. **自动写日记**：你聊完一段重要内容，AI 会在回复末尾写一份日记文件。Agent 用 `write_file` 工具写入 `~/.midnight/recall/dailynote/`，`ingest.py` 自动入库。
+1. **自动写日记**：你聊完一段重要内容，AI 会在回复末尾写一份日记文件。Agent 用 `write_file` 工具写入 **当前 agent 专属目录** `~/.midnight/recall/<agent>/dailynote/`（`<agent>` 为当前智能体名，默认 `default`），`ingest.py` 自动入库。**不要写根级 `~/.midnight/recall/dailynote/`**——那是无主数据，不属于任何智能体。
 2. **联想式召回**：不靠关键词命中，而是通过"标签共现网络"脉冲传播——你今天说"压力大"，昨天聊的"考试"会自动浮上来。
 3. **时间感知**：最近的记忆有更高权重，新会话开头不空白。
 4. **可配置**：召回数量、联想强度、时间权重、截断比例均可调。
@@ -29,7 +29,7 @@ description: "让 AI 拥有长期记忆——自动写日记、联想式召回�
 
 ## 写日记协议
 
-当需要写日记时，使用 `write_file` 工具把日记写到 `~/.midnight/recall/dailynote/` 目录下，文件名为 `YYYY-MM-DD_HHMMSS.md`。
+当需要写日记时，使用 `write_file` 工具把日记写到 **当前 agent 专属目录** `~/.midnight/recall/<agent>/dailynote/`（`<agent>` 为当前智能体名，默认 `default`），文件名为 `YYYY-MM-DD_HHMMSS.md`。**不要写到根级 `~/.midnight/recall/dailynote/`**——那不在 `list_agents()` 覆盖内，不会被任何智能体召回。
 
 日记格式采用 YAML frontmatter：
 
@@ -72,7 +72,8 @@ python recall.py --query "用户的问题" --k 10 --tag-weight 0.5 --time-ratio 
 
 ```python
 from scripts.recall import recall_associative
-results = recall_associative("用户的问题", "~/.midnight/recall/recall.db", embedding_client,
+# 注意：db 路径是当前 agent 专属库 ~/.midnight/recall/<agent>/recall.db，不是根级 recall.db
+results = recall_associative("用户的问题", "~/.midnight/recall/default/recall.db", embedding_client,
                              k=10, tag_weight=0.3, time_ratio=0.2, truncate=1.0)
 ```
 
@@ -123,6 +124,20 @@ python evolution.py --decay --stale-days 90 --factor 0.5
 python evolution.py --log
 ```
 
+## 多智能体物理隔离与孤儿数据
+
+每个智能体有自己独立的 `recall.db` 与 `dailynote/`（`~/.midnight/recall/<agent>/`），互不读取、互不写入。`--auto` 路由时非 default agent 需与查询有词面锚定才会被选中，泛化/情绪化查询回落到 `default`，避免跨库误取私密记忆。
+
+早期单库时代残留的数据（根级 `~/.midnight/recall/recall.db`、根级 `~/.midnight/recall/dailynote/`）不属于任何 agent，也不会被 `list_agents()` 识别。用 `maintenance.py` 检测并归并：
+
+```bash
+## 只报告，不修改
+python maintenance.py --scan
+
+## 把根级孤儿数据迁移进指定 agent（默认 default），并自动重新入库
+python maintenance.py --migrate --agent default
+```
+
 ## 首次使用
 
 首次运行前，需要初始化数据库和配置：
@@ -134,11 +149,12 @@ pip install requests
 ## 初始化（可选，ingest 会自动创建）
 ## 设置 embedding API key（可选，默认使用假 embedding 离线可用）
 # export SILICONFLOW_API_KEY="sk-..."
-# export MIDNIGHT_DB_PATH="~/.midnight/recall/recall.db"
-# export MIDNIGHT_DAILYNOTE_PATH="~/.midnight/recall/dailynote/"
+# export MIDNIGHT_BASE_DIR="~/.midnight"        # 记忆根目录（默认 ~/.midnight）
+# export MIDNIGHT_AGENT="default"               # 当前智能体（决定写入哪个子区）
+# 注意：MIDNIGHT_DB_PATH / MIDNIGHT_DAILYNOTE_PATH 已废弃，路径一律按 agent 从 BASE_DIR 推导
 
-## 入库已有的日记文件
-python ingest.py ~/.midnight/recall/dailynote/
+## 入库当前 agent 的日记（按 agent 子目录，勿指向根级 dailynote）
+python ingest.py ~/.midnight/recall/default/dailynote/
 
 ## 测试召回
 python recall.py --query "写一条测试查询" --k 5
@@ -156,6 +172,7 @@ skills/recall/
 │   ├── self_model.py     # self 锚生成/读取/演化（定海锚 + 可动层）
 │   ├── evolution.py      # 自进化（可动层覆写 + 演化日志 + 久不用衰减）
 │   ├── session_start.py  # 首轮上下文轻编译（身份摘要 ≤200 字）
+│   ├── maintenance.py    # 根级孤儿数据检测/迁移（--scan / --migrate）
 │   ├── embedding.py      # embedding 客户端（可注入 fake）
 │   └── schema.py         # SQLite schema
 ├── tests/
