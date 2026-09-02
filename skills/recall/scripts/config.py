@@ -34,6 +34,11 @@ def get_dailynote_path(agent: str = None) -> str:
     return os.path.join(agent_dir, 'dailynote')
 
 
+def get_self_path(agent: str = None) -> str:
+    """Get the agent's identity file (self.md) path."""
+    return os.path.join(get_agent_dir(agent), 'self.md')
+
+
 def ensure_agent_dir(agent: str = None) -> str:
     """Ensure agent's data directory exists. Returns the path."""
     agent_dir = get_agent_dir(agent)

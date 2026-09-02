@@ -19,6 +19,10 @@ sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可
 
 from schema import init_db  # noqa: E402
 from scripts.config import get_db_path, get_dailynote_path, ensure_agent_dir  # noqa: E402
+from scripts.tag_network import (  # noqa: E402
+    DISTANCE_LAMBDA, FORWARD_DAMP, REVERSE_DAMP, MAX_REVERSE_RATIO,
+    _edge_contribution,
+)
 
 MAX_CHUNK_CHARS = 512
 
@@ -202,6 +206,35 @@ def ingest_file(file_path: str, db_path: str, embedding_client, conn: Optional[s
                          weight = weight + 1,
                          updated_at = datetime('now')""",
                     (t1, t2)
+                )
+
+        # Directed ordered edges (VCP TagMemo §A1): same-file tags by appearance
+        # order. forward (顺流) = earlier→later, reverse (逆流) = later→earlier.
+        # contribution = order potential · exp(-position distance / λ),
+        # then scaled by direction damping (顺流 > 逆流, reverse ratio guarded).
+        n_tags = len(tag_ids)
+        for i in range(n_tags):
+            for j in range(i + 1, n_tags):
+                contrib = _edge_contribution(i, j)
+                if contrib <= 0:
+                    continue
+                fwd = contrib * FORWARD_DAMP
+                rev = contrib * min(REVERSE_DAMP, FORWARD_DAMP * MAX_REVERSE_RATIO)
+                conn.execute(
+                    """INSERT INTO tag_edges (tag_from_id, tag_to_id, weight, updated_at)
+                       VALUES (?, ?, ?, datetime('now'))
+                       ON CONFLICT(tag_from_id, tag_to_id) DO UPDATE SET
+                         weight = weight + excluded.weight,
+                         updated_at = datetime('now')""",
+                    (tag_ids[i], tag_ids[j], fwd)
+                )
+                conn.execute(
+                    """INSERT INTO tag_edges (tag_from_id, tag_to_id, weight, updated_at)
+                       VALUES (?, ?, ?, datetime('now'))
+                       ON CONFLICT(tag_from_id, tag_to_id) DO UPDATE SET
+                         weight = weight + excluded.weight,
+                         updated_at = datetime('now')""",
+                    (tag_ids[j], tag_ids[i], rev)
                 )
 
         conn.commit()

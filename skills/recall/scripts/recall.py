@@ -137,6 +137,25 @@ def format_recall_output(results: list[dict], max_chars: int = 200) -> str:
     return "\n\n".join(lines)
 
 
+def _time_score(date_str: str) -> float:
+    """Recency score: 7d→1.0, 30d→0.5, 90d→0.2, older→0.05."""
+    if not date_str:
+        return 0.0
+    from datetime import datetime
+    try:
+        diary_date = datetime.strptime(date_str, '%Y-%m-%d')
+        days_ago = (datetime.now() - diary_date).days
+        if days_ago <= 7:
+            return 1.0
+        if days_ago <= 30:
+            return 0.5
+        if days_ago <= 90:
+            return 0.2
+        return 0.05
+    except ValueError:
+        return 0.0
+
+
 def recall_associative(query: str, db_path: str, embedding_client,
                        k: int = 10, tag_weight: float = 0.3,
                        decay: float = 0.5, max_depth: int = 2,
@@ -157,30 +176,13 @@ def recall_associative(query: str, db_path: str, embedding_client,
     activated = activate_tags(query_vec, db_path, embedding_client,
                               decay=decay, max_depth=max_depth, threshold=threshold)
 
-    # 3. Compute time scores
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    for r in vector_results:
-        r['time_score'] = 0.0
-        if r.get('date'):
-            try:
-                diary_date = datetime.strptime(r['date'], '%Y-%m-%d')
-                days_ago = (now - diary_date).days
-                if days_ago <= 7:
-                    r['time_score'] = 1.0
-                elif days_ago <= 30:
-                    r['time_score'] = 0.5
-                elif days_ago <= 90:
-                    r['time_score'] = 0.2
-                else:
-                    r['time_score'] = 0.05
-            except ValueError:
-                pass
-
-    # 4. Combine scores
+    # 3. Combine scores
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        for r in vector_results:
+            r['time_score'] = _time_score(r.get('date'))
+
         if not activated:
             # No tag boost, just vector + time
             for r in vector_results:
@@ -188,8 +190,8 @@ def recall_associative(query: str, db_path: str, embedding_client,
             vector_results.sort(key=lambda x: x['score'], reverse=True)
             return vector_results[:final_k]
 
-        activated_ids = [tid for tid, _ in activated]
         strength_map = {tid: s for tid, s in activated}
+        seen = {r['chunk_id'] for r in vector_results}
 
         boosted = []
         for r in vector_results:
@@ -203,6 +205,50 @@ def recall_associative(query: str, db_path: str, embedding_client,
                 'tag_strength': tag_strength,
                 'score': r['score'] + tag_weight * tag_strength + time_ratio * r['time_score'],
             })
+
+        # Deep association: chunks that carry an activated tag but fell outside the
+        # vector top-k can still surface (e.g. 压力 → 紧张 → 雅思, lexically disjoint
+        # from the query). Only pulled when tag boosting is active, and bounded.
+        if tag_weight > 0:
+            extra = []
+            for tid, s in activated:
+                if s <= 0:
+                    continue
+                for row in conn.execute(
+                        "SELECT chunk_id FROM chunk_tags WHERE tag_id = ?", (tid,)).fetchall():
+                    cid = row['chunk_id']
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                    meta = conn.execute("""
+                        SELECT c.id, c.content, c.file_id,
+                               COALESCE(f.diary_date, f.created_at) AS date,
+                               f.file_path, c.importance, c.access_count
+                        FROM chunks c JOIN files f ON c.file_id = f.id
+                        WHERE c.id = ?
+                    """, (cid,)).fetchone()
+                    if not meta:
+                        continue
+                    trows = conn.execute(
+                        "SELECT tag_id FROM chunk_tags WHERE chunk_id = ?", (cid,)).fetchall()
+                    tag_strength = sum(strength_map.get(t['tag_id'], 0.0) for t in trows)
+                    if tag_strength <= 0:
+                        continue
+                    date_str = meta['date'][:10] if meta['date'] else ''
+                    ts = _time_score(date_str)
+                    extra.append({
+                        'chunk_id': meta['id'],
+                        'content': meta['content'],
+                        'date': date_str,
+                        'file_path': meta['file_path'],
+                        'score': tag_weight * tag_strength + time_ratio * ts,
+                        'importance': meta['importance'] or 'medium',
+                        'access_count': meta['access_count'] or 0,
+                        'tag_strength': tag_strength,
+                        'time_score': ts,
+                    })
+            boosted.extend(extra)
+
         boosted.sort(key=lambda x: x['score'], reverse=True)
         return boosted[:final_k]
     finally:

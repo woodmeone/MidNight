@@ -47,6 +47,8 @@ tags: [考试, 压力, 面试]
 - `created`：ISO 格式时间戳（精确到秒）
 - `importance`：重要性（high/medium/low），影响召回权重。high=1.5倍，medium=1.0倍，low=0.5倍
 - `tags`：标签数组，用逗号分隔。**标签是联想的关键**——同一次日记中出现的标签会在共现矩阵中连线，未来任何一个标签被激活，关联标签的内容也会被召回。所以标签要准确、有区分度、有覆盖度。
+
+**对象标签规约（V2）**：Midnight 只维护**一个记忆库**（单 agent 单库）。每个遇到的人/组织是一个"对象"——对象不是一个独立库，而是一组 anchor tag：凡是关于对象 X 的日记，`tags` 里必须带上 `X`（如 `阿散`）。对象与对象、对象与话题靠共现网自然缠绕，无需建子目录或分库。
 - 正文：纯文本，记录核心事件、关键信息、情感状态。
 
 **写日记的时机**：
@@ -86,6 +88,41 @@ results = recall_associative("用户的问题", "~/.midnight/recall/recall.db", 
 | 沉默后回复 | 5 | 0.3 | 0.3 | 0.3 | 轻量召回，快速给上下文 |
 | 用户明确说"记住"（不触发召回） | — | — | — | — | 只写日记，不做召回 |
 
+## init 引导（首建自我 + 认识你）
+
+V2：每个 agent 是一个有独立自我的个体。首次运行做**轻引导**——先建 self 锚，再问对方怎么称呼，把名字当作对象 anchor tag 写进后续日记。引导只 1–2 句话 + 默认值，不打断主流程。
+
+**首建自我（第一次对话时）**：调用 `self_model.py --init` 自动生成 self.md（无则建，已有则幂等不动）：
+
+```bash
+python self_model.py --init
+```
+
+若尚无 self，用 1–2 句话引导用户"给自己定位"，例如：
+> 你还没给自己定位——想要怎样的性格/能力/边界？不说的话我先用默认值（冷静高效的助手），随时可改。
+
+默认值见 `self_model.py` 的 `DEFAULT_TEMPLATE`（name=midnight-agent，persona_style=冷静高效务实）。
+
+**认识使用者（对象锚）**：
+- 主动问对方称呼，例如：> 我该怎么称呼你？之后关于你的事我都会记进日记。
+- 得到名字（如"阿散"）后，凡涉及该使用者的日记，`tags` 里都要带上这个名字（见"对象标签规约"）。
+- 对方不回答就继续用默认值，不纠缠。
+
+## 自进化（/evolution）
+
+Agent 会基于新交互/调研/**镜像反馈**（自己回看自己的表现）评估并改写 self 的**可动层**；**定海锚只读**，改 name/anchor_tags/description 会被拒绝——防跑飞。规则不固化：高频纠正靠日记共现自然强化关联；长期不用的关联可显式衰减。
+
+```bash
+# 应用一次演化（可动层 patch；定海锚字段自动被拒）
+python evolution.py --apply --feedback "用户纠正：Windows 用 py" --patch '{"position": "Windows 工程师"}' --source user
+
+# 久不用衰减：90 天未触碰的关联降权，弱边删除
+python evolution.py --decay --stale-days 90 --factor 0.5
+
+# 查看演化历史
+python evolution.py --log
+```
+
 ## 首次使用
 
 首次运行前，需要初始化数据库和配置：
@@ -113,17 +150,23 @@ python recall.py --query "写一条测试查询" --k 5
 skills/recall/
 ├── SKILL.md              # 本文件
 ├── scripts/
-│   ├── ingest.py         # 日记入库（切块 → 向量化 → SQLite）
-│   ├── recall.py         # 联想召回（向量 + 标签脉冲 + 时间）
-│   ├── tag_network.py    # 标签共现矩阵 + 脉冲传播
+│   ├── ingest.py         # 日记入库（切块 → 向量化 → SQLite + 方向边）
+│   ├── recall.py         # 联想召回（向量 + 标签脉冲 + 时间 + 深联想扩增）
+│   ├── tag_network.py    # 标签方向边 + 脉冲传播（压缩/枢纽校正/预算/Core-Ghost）
+│   ├── self_model.py     # self 锚生成/读取/演化（定海锚 + 可动层）
+│   ├── evolution.py      # 自进化（可动层覆写 + 演化日志 + 久不用衰减）
+│   ├── session_start.py  # 首轮上下文轻编译（身份摘要 ≤200 字）
 │   ├── embedding.py      # embedding 客户端（可注入 fake）
 │   └── schema.py         # SQLite schema
 ├── tests/
 │   ├── conftest.py
-│   ├── test_ticket01.py
-│   ├── test_ticket02.py
-│   ├── test_ticket03.py
-│   └── test_ticket04.py
+│   ├── test_ticket01.py  ~ test_ticket04.py
+│   ├── test_self_model.py
+│   ├── test_object_association.py
+│   ├── test_t3_deep_association.py
+│   ├── test_session_start.py
+│   ├── test_diary_isolation.py / test_auto_routing.py / test_end_to_end.py
+│   └── test_adversarial.py / test_features_adversarial.py / test_base_dir.py
 └── references/           # 按需加载的深度参考
 ```
 
