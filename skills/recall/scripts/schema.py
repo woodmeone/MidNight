@@ -53,9 +53,19 @@ CREATE TABLE IF NOT EXISTS tag_cooccurrence (
     CHECK (tag1_id < tag2_id)
 );
 
+CREATE TABLE IF NOT EXISTS tag_edges (
+    tag_from_id INTEGER NOT NULL REFERENCES tags(id),
+    tag_to_id INTEGER NOT NULL REFERENCES tags(id),
+    weight REAL NOT NULL DEFAULT 0.0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (tag_from_id, tag_to_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
 CREATE INDEX IF NOT EXISTS idx_tag_cooccurrence_weight ON tag_cooccurrence(weight DESC);
+CREATE INDEX IF NOT EXISTS idx_tag_edges_from ON tag_edges(tag_from_id);
+CREATE INDEX IF NOT EXISTS idx_tag_edges_to ON tag_edges(tag_to_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_importance ON chunks(importance);
 CREATE INDEX IF NOT EXISTS idx_chunks_access ON chunks(access_count DESC);
 """

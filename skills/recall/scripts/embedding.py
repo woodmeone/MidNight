@@ -37,6 +37,43 @@ class FakeEmbeddingClient(EmbeddingClient):
         return results
 
 
+class SemanticFakeEmbeddingClient(EmbeddingClient):
+    """Deterministic, semantically-aware pseudo-embedding for testing.
+
+    Vector = normalized bag of character bigrams. Two strings share a feature
+    index iff they share characters, so a query that mentions a topic tag
+    (e.g. "跑马拉松 紧张" vs tag "马拉松") gets a high cosine for that tag and
+    ~0 for unrelated tags. This lets integration tests exercise the real
+    query → seed sensing → pulse propagation path deterministically, without
+    engine test hooks.
+    """
+
+    FEATURE_DIM = 256
+
+    def __init__(self, dimension: int = 1024):
+        super().__init__(dimension=dimension)
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [self._bow(text) for text in texts]
+
+    def _bow(self, text: str) -> list[float]:
+        from collections import Counter
+        chars = [c for c in text if not c.isspace()]
+        features = []
+        for i in range(len(chars)):
+            features.append(chars[i])
+            if i + 1 < len(chars):
+                features.append(chars[i] + chars[i + 1])
+        vec = [0.0] * self.FEATURE_DIM
+        for feat, cnt in Counter(features).items():
+            idx = int(hashlib.md5(feat.encode('utf-8')).hexdigest()[:8], 16) % self.FEATURE_DIM
+            vec[idx] += cnt
+        norm = sum(x * x for x in vec) ** 0.5
+        if norm:
+            vec = [x / norm for x in vec]
+        return vec
+
+
 class SiliconFlowEmbeddingClient(EmbeddingClient):
     """Real embedding client calling SiliconFlow's OpenAI-compatible API."""
 
