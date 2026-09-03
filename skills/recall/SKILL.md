@@ -56,16 +56,35 @@ tags: [考试, 压力, 面试]
 - 聊天中产生了有价值的信息（重要偏好、个人经历、计划、关键决策、学习收获等）
 - 注意：**不需要每次对话都写**，只在真正有保留价值的内容出现时才写。避免写琐碎的日常闲聊，保持日记的"信息密度"——精炼、聚焦核心。
 
+## 身份绑定（强制前置，V3）
+
+**每次会话开工前，AI 必须先确定"我是谁"，然后全会话的写/查都显式绑到自己的记忆区。** 这是隔离墙的第一道守卫：
+
+1. **声明身份**：会话开始时识别本 AI 的角色名（如 `qinglan`=主助理、`mira`=社交管家）。
+2. **开户（可选）**：若这是一个新智能体，先 `python recall.py --register '<身份描述>' --identity <名字>` 立身份、建记忆区。
+3. **写日记用 `--agent`**：`python ingest.py --agent <我的名字> <日记路径>`（会自动开户）。
+4. **召回用 `--identity <我的名字>`**：`python recall.py --query "..." --identity <我的名字> --k 10`（也会自动开户）。
+5. **`--auto` 只作兜底**：仅当"我这个会话确实不知道该查哪个区"时才用；一旦身份已知就禁用 auto，**绝不让语义猜库戳破记忆隔离墙**。
+
+> **身份即开户**：只要显式给出 `--identity/--agent/--register <名字>`，recall 就会自动为该智能体建目录 + agent.json，
+> 立即出现在 `list_agents()` 中——无需先写过日记。`default` 是兜底槽位，不会生成身份文件。
+
+> 原理（第一性）：身份是会话持有者（上层 AI）声明的事实，不是该由 embedding 去猜的东西。
+> `--identity` 让召回永远落在自己区；只有从未声明身份时，auto 的字面锚定兜底才接管。
+
 ## 召回调用
 
 使用 `recall.py` 做联想召回：
 
 ```bash
-# 最基本的召回
-python recall.py --query "用户的问题或当前话题" --k 10
+# 最基本的召回（强烈建议带身份：显式指定记忆区）
+python recall.py --identity qinglan --query "用户的问题" --k 10
+
+# 不带身份时的联想召回（无身份 → 可用 --auto 兜底，但可能跨区）
+python recall.py --query "用户的问题" --k 10
 
 # 带联想和时间加权的召回
-python recall.py --query "用户的问题" --k 10 --tag-weight 0.5 --time-ratio 0.3 --truncate 0.5
+python recall.py --identity qinglan --query "用户的问题" --k 10 --tag-weight 0.5 --time-ratio 0.3 --truncate 0.5
 ```
 
 你也可以直接调用 `recall_associative` 函数（如果脚本作为模块导入）：

@@ -13,7 +13,7 @@ sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from embedding 可�
 sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 from embedding import load_embedding_client  # noqa: E402
 from scripts.config import (  # noqa: E402
-    get_db_path, list_agents, DEFAULT_AGENT,
+    get_db_path, list_agents, DEFAULT_AGENT, ensure_agent,
 )
 
 # 词面锚定阈值：非 default agent 需与查询共享 ≥ 该数量的汉字才算"可信候选"，
@@ -96,6 +96,29 @@ def recall(query: str, db_path: str, embedding_client, k: int = 10) -> list[dict
         return scored[:k]
     finally:
         conn.close()
+
+
+def recall_by_identity(query: str, embedding_client, identity: str,
+                       k: int = 10, tag_weight: float = 0.3,
+                       time_ratio: float = 0.2, truncate: float = 1.0) -> list[dict]:
+    """Identity-preferred recall: 上层会话显式声明了「我是谁」就查谁的记忆区。
+
+    与 auto_recall 的关键差异：auto_recall 靠"查询文本 vs agent 描述"的语义相似度
+    去 *猜* 该查哪个库；本函数把身份当作确定性事实——身份指向的 agent 就是目标库，
+    不做任何猜库、不跨区。query 只在目标 agent 的库内做向量+标签脉冲召回。
+
+    隔离墙由此保持：青岚会话传 identity=qinglan 就永远查 qinglan 区，
+    mira 会话传 identity=mira 就永远查 mira 区，auto 的语义猜库不会再戳破分区。
+    """
+    if not identity:
+        return []
+    db_path = get_db_path(identity)
+    if not os.path.exists(db_path):
+        return []
+    results = recall_associative(query, db_path, embedding_client,
+                                 k=k, tag_weight=tag_weight,
+                                 time_ratio=time_ratio, truncate=truncate)
+    return results
 
 
 def auto_recall(query: str, embedding_client, k: int = 10,
@@ -296,6 +319,7 @@ def main(argv=None) -> int:
     k = 10
     agent = os.environ.get('MIDNIGHT_AGENT')
     auto = False
+    register = None
     db_path = None
     api_key = os.environ.get('SILICONFLOW_API_KEY', '')
 
@@ -311,8 +335,11 @@ def main(argv=None) -> int:
         elif arg == '--auto':
             auto = True
             i += 1
-        elif arg == '--agent' and i + 1 < len(argv):
+        elif arg in ('--agent', '--identity') and i + 1 < len(argv):
             agent = argv[i + 1]
+            i += 2
+        elif arg == '--register' and i + 1 < len(argv):
+            register = argv[i + 1]
             i += 2
         elif arg == '--db' and i + 1 < len(argv):
             db_path = argv[i + 1]
@@ -324,12 +351,31 @@ def main(argv=None) -> int:
             print(f"Unknown option: {arg}", file=sys.stderr)
             return 2
 
+    # --register：只开户、立身份，不召回（无需 query 也可用）
+    if register:
+        if not agent:
+            print("Usage: --register '<描述>' 需要配合 --identity <名字>", file=sys.stderr)
+            return 1
+        ensure_agent(agent, description=register)
+        print(f"[开户] 已为智能体「{agent}」建立记忆区并登记身份。")
+        return 0
+
     if not query:
         print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY]", file=sys.stderr)
         return 1
 
     config = {'api_key': api_key, 'dimension': 1024}
     client = load_embedding_client(config)
+
+    # 身份优先：上层显式声明了 --agent/--identity 就查该智能体区，--auto 不得覆盖。
+    # （身份是确定事实，auto 猜库只在身份缺失时才兜底，避免戳破记忆隔离墙。）
+    if agent:
+        # 声明身份即开户：即使该区还没写过日记，也已立身份、在 list_agents 中可见
+        ensure_agent(agent)
+        results = recall_by_identity(query, client, identity=agent, k=k)
+        output = format_recall_output(results)
+        print(output)
+        return 0
 
     if auto:
         result = auto_recall(query, client, k=k)

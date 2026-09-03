@@ -18,7 +18,7 @@ sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from schema 可用
 sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 
 from schema import init_db  # noqa: E402
-from scripts.config import get_db_path, get_dailynote_path, ensure_agent_dir  # noqa: E402
+from scripts.config import get_db_path, get_dailynote_path, ensure_agent  # noqa: E402
 from scripts.tag_network import (  # noqa: E402
     DISTANCE_LAMBDA, FORWARD_DAMP, REVERSE_DAMP, MAX_REVERSE_RATIO,
     _edge_contribution,
@@ -303,7 +303,7 @@ def main(argv=None) -> int:
     # Resolve paths from agent if not explicitly set
     db_path = db_path or get_db_path(agent)
     diary_dir = diary_dir or get_dailynote_path(agent)
-    ensure_agent_dir(agent)
+    ensure_agent(agent)
 
     from embedding import load_embedding_client
     config = {'api_key': api_key, 'dimension': 1024}

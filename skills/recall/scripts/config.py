@@ -46,6 +46,38 @@ def ensure_agent_dir(agent: str = None) -> str:
     return agent_dir
 
 
+def ensure_agent(agent: str = None, description: str = None) -> str:
+    """声明身份 = 自动开户：建目录 + 立身份 (agent.json)，幂等。
+
+    与 ensure_agent_dir 的区别：本函数让"有名字的智能体"在 list_agents() 中
+    立刻可见（仅建目录不会生成 agent.json，而 list_agents 依据它来识别智能体）。
+    约定：
+      - `default` 是兜底槽位，不生成身份文件（不冒充具名 AI）。
+      - 已开户则不覆盖已有 description；仅当缺 description 且本次提供时才补写。
+    """
+    if not agent:
+        agent = os.environ.get('MIDNIGHT_AGENT') or DEFAULT_AGENT
+    agent_dir = ensure_agent_dir(agent)
+    if agent == DEFAULT_AGENT:
+        return agent_dir
+
+    meta_path = os.path.join(agent_dir, 'agent.json')
+    data = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    if not data.get('description'):
+        data['description'] = description or agent
+    if not data.get('name'):
+        data['name'] = agent
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return agent_dir
+
+
 def list_agents() -> list[dict]:
     """Scan all agents under BASE_DIR, return list of {name, description, path, keywords}.
 
