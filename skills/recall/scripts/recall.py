@@ -178,8 +178,13 @@ def auto_recall(query: str, embedding_client, k: int = 10,
     return {**best, 'ambiguous': ambiguous, 'results': results}
 
 
-def format_recall_output(results: list[dict], max_chars: int = 200) -> str:
-    """Format recall results as a context-injectable text block."""
+def format_recall_output(results: list[dict], max_chars: int = None) -> str:
+    """Format recall results as a context-injectable text block.
+
+    默认**保留完整 chunk，不硬截断**（语义优先：截断会在句子中间拦腰切断，破坏信息）。
+    只当调用方显式传 `max_chars` 时才按字符截断（向后兼容的历史兜底）；
+    上下文体积控制应走 `fit_to_budget` 的按预算收条，而不是靠截断单条。
+    """
     if not results:
         return "[回忆] 暂无相关记忆。"
 
@@ -187,10 +192,64 @@ def format_recall_output(results: list[dict], max_chars: int = 200) -> str:
     for r in results:
         date_part = f"（{r['date']}）" if r['date'] else ""
         content = r['content']
-        if len(content) > max_chars:
+        if max_chars is not None and len(content) > max_chars:
             content = content[:max_chars] + "…"
         lines.append(f"{date_part}{content}")
     return "\n\n".join(lines)
+
+
+def dedupe_results(results: list[dict]) -> list[dict]:
+    """注入前全局去重（对齐 VCP ResultDeduplicator 的硬去重）。
+
+    只去"真冗余"，不去"有关联的不同记忆"：
+      - 同一 chunk_id 只留一次（联想/标签命中会重复带出同一 chunk）；
+      - 规范化正文（去掉空白）相同视为重复，保留相关度更高的那条；
+      - 不同正文绝不删除——避免漏掉有效信息。
+    顺序保持召回相关度降序。
+    """
+    if not results:
+        return results
+    seen_ids = set()
+    seen_norm = set()
+    out = []
+    for r in results:
+        cid = r.get('chunk_id')
+        norm = ''.join((r.get('content') or '').split())
+        if cid is not None and cid in seen_ids:
+            continue
+        if norm in seen_norm:
+            continue
+        if cid is not None:
+            seen_ids.add(cid)
+        seen_norm.add(norm)
+        out.append(r)
+    return out
+
+
+def fit_to_budget(results: list[dict], budget_chars: int = None) -> list[dict]:
+    """预算收敛：在有限上下文预算内按相关度取「完整」条目。
+
+    - 该召回多少召回多少（recall_associative 内部不动，召回充足）；
+    - 注入前按预算从高到低收条，预算内每条保留完整正文，**绝不拦腰截断**；
+    - 对抗兜底：若最相关的一条单就超过预算，仍注入那一条（宁有一条完整，不返回空）。
+
+    这使 token 有硬上限（不会随召回量爆掉），同时又不损语义。
+    """
+    if not results or budget_chars is None or budget_chars <= 0:
+        return results
+    fitted = []
+    used = 0
+    for r in results:
+        length = len(r.get('content') or '')
+        if not fitted:              # 至少注入相关度最高的一条（单条超预算也完整保留）
+            fitted.append(r)
+            used = length
+            continue
+        if used + length > budget_chars:
+            break                   # 预算用尽即停，不再硬塞
+        fitted.append(r)
+        used += length
+    return fitted
 
 
 def _time_score(date_str: str) -> float:
@@ -320,6 +379,7 @@ def main(argv=None) -> int:
     agent = os.environ.get('MIDNIGHT_AGENT')
     auto = False
     register = None
+    budget = None
     db_path = None
     api_key = os.environ.get('SILICONFLOW_API_KEY', '')
 
@@ -341,6 +401,9 @@ def main(argv=None) -> int:
         elif arg == '--register' and i + 1 < len(argv):
             register = argv[i + 1]
             i += 2
+        elif arg == '--budget' and i + 1 < len(argv):
+            budget = int(argv[i + 1])
+            i += 2
         elif arg == '--db' and i + 1 < len(argv):
             db_path = argv[i + 1]
             i += 2
@@ -361,7 +424,7 @@ def main(argv=None) -> int:
         return 0
 
     if not query:
-        print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY]", file=sys.stderr)
+        print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY] [--budget N]", file=sys.stderr)
         return 1
 
     config = {'api_key': api_key, 'dimension': 1024}
@@ -373,6 +436,7 @@ def main(argv=None) -> int:
         # 声明身份即开户：即使该区还没写过日记，也已立身份、在 list_agents 中可见
         ensure_agent(agent)
         results = recall_by_identity(query, client, identity=agent, k=k)
+        results = dedupe_results(fit_to_budget(results, budget))
         output = format_recall_output(results)
         print(output)
         return 0
@@ -381,13 +445,15 @@ def main(argv=None) -> int:
         result = auto_recall(query, client, k=k)
         if result['name']:
             print(f"[自动路由] → 匹配到智能体「{result['name']}」({result['description']}, 相似度={result['score']:.3f})\n")
-        output = format_recall_output(result['results'])
+        results = dedupe_results(fit_to_budget(result['results'], budget))
+        output = format_recall_output(results)
         print(output)
         return 0
 
     db_path = db_path or get_db_path(agent)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     results = recall(query, db_path, client, k=k)
+    results = dedupe_results(fit_to_budget(results, budget))
     output = format_recall_output(results)
     print(output)
     return 0
