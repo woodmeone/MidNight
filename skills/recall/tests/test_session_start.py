@@ -12,7 +12,7 @@ import pytest
 
 import scripts.config as cfg
 from scripts.self_model import ensure_self, get_self_path
-from scripts.session_start import compile_identity_summary, MAX_CHARS, GUIDANCE_TEXT, main
+from scripts.session_start import compile_identity_summary, GUIDANCE_TEXT, main
 
 
 @pytest.fixture
@@ -44,21 +44,22 @@ def test_summary_contains_identity(agent):
     assert '记忆' in summary
 
 
-def test_summary_length_bounded(agent):
-    """摘要长度受控，不把全档 persona 塞进上下文"""
+def test_summary_keeps_full_fields_no_truncation(agent):
+    """身份摘要是最基础信息，能有多少就多少：超长字段也完整保留，不拦腰硬截（无省略号）"""
     ensure_self(agent, defaults={
         'name': 'mira',
         'anchor_tags': ['midnight'],
         'mutable': {
-            'persona_style': '冷静' * 60,            # 刻意塞长文本
+            'persona_style': '冷静' * 60,            # 刻意塞超长文本，须完整保留
             'capabilities': [f'能力{i}' for i in range(50)],
             'position': 'AI 助手' * 40,
         },
         'description': 'x' * 500,
     })
     summary = compile_identity_summary(agent)
-    assert len(summary) <= MAX_CHARS
-    assert summary.endswith('…')
+    assert '冷静' * 60 in summary      # 刻意超长的风格字段完整保留，绝不拦腰切
+    assert '能力49' in summary          # 第 50 项能力也在（没在头部就截断）
+    assert '…' not in summary           # 不出现截断省略号
 
 
 def test_summary_without_self_returns_empty(agent):

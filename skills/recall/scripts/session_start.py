@@ -2,8 +2,11 @@
 
 V2: a new session shouldn't start blank (remember self + current object), but
 must NOT stuff the full persona into context like letta does. This module only
-compiles a short (≤200 chars) identity digest from self.md into the first-turn
+compiles an identity digest from self.md's key fields into the first-turn
 system/user prompt; everything else is left to associative recall.
+
+身份摘要是**最基础的信息**，可能含关键基础内容，所以**绝不拦腰硬截**——能有多少给多少；
+精简靠"只取关键字段"（name / 锚标签 / 可动层）而非字符截断。
 
 CLI:
     python session_start.py [--agent X]
@@ -16,9 +19,6 @@ sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from scripts.self_mo
 sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 from scripts.self_model import read_self  # noqa: E402
 
-# 身份摘要长度上限（约 200 字）
-MAX_CHARS = 200
-
 GUIDANCE_TEXT = (
     "[身份] 首次运行，尚未定位自我。可用 self_model.py --init 创建 self 锚；"
     "或直接告诉我你希望我是什么样的人。其余记忆靠联想召回。"
@@ -26,11 +26,12 @@ GUIDANCE_TEXT = (
 
 
 def compile_identity_summary(agent: str = None) -> str:
-    """Compile self.md into a ≤200-char identity digest.
+    """Compile self.md's key fields into an identity digest.
 
-    Includes the 定海锚 (name / anchor_tags) plus a 可动层 overview
-    (persona_style / capabilities). Returns '' when no self.md exists —
-    callers should fall back to GUIDANCE_TEXT.
+    Only the 定海锚 (name / anchor_tags) plus a 可动层 overview
+    (persona_style / capabilities) are included — not the whole self.md.
+    不设长度上限、不截断：身份是最基础的，短则尽短，长则完整。
+    Returns '' when no self.md exists — callers should fall back to GUIDANCE_TEXT.
     """
     data = read_self(agent)
     if not data or not data.get('name'):
@@ -52,10 +53,7 @@ def compile_identity_summary(agent: str = None) -> str:
         parts.append(f"风格:{persona_style}")
     if cap_str:
         parts.append(f"能力:{cap_str}")
-    summary = '；'.join(parts)
-    if len(summary) > MAX_CHARS:
-        summary = summary[:MAX_CHARS - 1] + '…'
-    return summary
+    return '；'.join(parts)
 
 
 def main(argv=None) -> int:
