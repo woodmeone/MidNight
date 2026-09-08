@@ -1,5 +1,6 @@
 # T2 · 深联想质量门槛 + 条数硬上限
 
+**Status**: ✅ DONE 2026-09-08（与 T1 一并实现：`TAG_CANDIDATE_CAP` 硬上界）
 **Blocked by**: T1
 **Spec**: P1（堵评论区痛点②的尾巴）
 

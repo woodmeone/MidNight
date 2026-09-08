@@ -1,5 +1,8 @@
 # T1 · tag-first 前置门控（核心，最痛，最先）
 
+**Status**: ✅ DONE 2026-09-08（与 T2 一并实现）
+**实现**: `expand_tag_candidates()` + `TAG_CANDIDATE_CAP`，`recall_associative` 改用它
+
 **Blocked by**: 无
 **Spec**: P0 / §4.1 铁律2
 **目标接口**: `recall_associative` 签名不变。

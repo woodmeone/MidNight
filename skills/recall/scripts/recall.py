@@ -20,6 +20,10 @@ from scripts.config import (  # noqa: E402
 # 防止泛化/情绪化查询（无领域词）被 embedding 相似度误导而路由到某个私人 agent。
 ROUTE_ANCHOR_MIN_SHARED = 2
 
+# 标签候选扩增硬上界：单个 recall 最多把多少个「非向量 top-k」的标签承载 chunk
+# 提升为候选。防止高频枢纽标签（如「考试」挂在几十上百条日记上）把候选池撑爆。
+TAG_CANDIDATE_CAP = 8
+
 
 def _agent_chars(agent: dict) -> set:
     """Agent 的领域字符集：description + keywords 去空格后的字符集合。"""
@@ -253,7 +257,8 @@ def fit_to_budget(results: list[dict], budget_chars: int = None) -> list[dict]:
 
 
 def _time_score(date_str: str) -> float:
-    """Recency score: 7d→1.0, 30d→0.5, 90d→0.2, older→0.05."""
+    """Recency score: 7d→1.0, 30d→0.5, 90d→0.2, older→0.05.
+    """
     if not date_str:
         return 0.0
     from datetime import datetime
@@ -269,6 +274,70 @@ def _time_score(date_str: str) -> float:
         return 0.05
     except ValueError:
         return 0.0
+
+
+def expand_tag_candidates(conn, activated, strength_map, seen, tag_weight,
+                          time_ratio, time_score_fn, cap=TAG_CANDIDATE_CAP) -> list[dict]:
+    """**tag-first 有界候选扩增**：标签承载的内容以标签出现与否来入候选，而非词面重叠。
+
+    这是对 VCP「tag-gate / 向量重塑」思想在本地引擎的落地：一个 chunk 是否值得被
+    联想带出，取决于它携带的标签是否被查询激活（标签先行），而不是它的正文向量
+    是否碰巧与查询文字重叠——词面不可见但语义同域的内容（如「张娜升学」带出的
+    「符职大金融科技」）由此可被召回。
+
+    与旧无界 deep-assoc 的关键差异：**候选扩增有硬上界 `cap`**，只保留 by tag_strength
+    最强的前 cap 条。高频枢纽标签（考试挂了几十上百条日记）再也不可能把候选池撑爆，
+    也保证了扩增结果的确定性。返回结构与 recall_associative 既有的 extra 一致。
+
+    注意：本函数**不修改传入 seen 之外的状态**，只把入选的 chunk_id 追加到 seen
+    以去重（沿用调用方传的 seen 引用）。
+    """
+    # tag-first 门控：任何携带「激活标签」的 chunk 都先进入候选视野
+    candidates: dict[int, list[int]] = {}
+    for tid, s in activated:
+        if s <= 0:
+            continue
+        for (cid,) in conn.execute(
+                "SELECT chunk_id FROM chunk_tags WHERE tag_id = ?", (tid,)).fetchall():
+            candidates.setdefault(cid, []).append(tid)
+
+    scored = []
+    for cid, tids in candidates.items():
+        if cid in seen:                      # 已在向量 top-k 或已入选 → 不重复
+            continue
+        tag_strength = sum(strength_map.get(t, 0.0) for t in tids)
+        if tag_strength <= 0:
+            continue
+        meta = conn.execute("""
+            SELECT c.id, c.content, c.file_id,
+                   COALESCE(f.diary_date, f.created_at) AS date,
+                   f.file_path, c.importance, c.access_count
+            FROM chunks c JOIN files f ON c.file_id = f.id
+            WHERE c.id = ?
+        """, (cid,)).fetchone()
+        if not meta:
+            continue
+        scored.append((tag_strength, cid, meta))
+
+    # 有界 + 确定：按标签强度降序取前 cap，最强必保留（保证高价值不被洪泛挤掉）
+    scored.sort(key=lambda x: x[0], reverse=True)
+    extra = []
+    for tag_strength, cid, meta in scored[:cap]:
+        seen.add(cid)
+        date_str = meta['date'][:10] if meta['date'] else ''
+        ts = time_score_fn(date_str)
+        extra.append({
+            'chunk_id': meta['id'],
+            'content': meta['content'],
+            'date': date_str,
+            'file_path': meta['file_path'],
+            'score': tag_weight * tag_strength + time_ratio * ts,
+            'importance': meta['importance'] or 'medium',
+            'access_count': meta['access_count'] or 0,
+            'tag_strength': tag_strength,
+            'time_score': ts,
+        })
+    return extra
 
 
 def recall_associative(query: str, db_path: str, embedding_client,
@@ -321,48 +390,15 @@ def recall_associative(query: str, db_path: str, embedding_client,
                 'score': r['score'] + tag_weight * tag_strength + time_ratio * r['time_score'],
             })
 
-        # Deep association: chunks that carry an activated tag but fell outside the
-        # vector top-k can still surface (e.g. 压力 → 紧张 → 雅思, lexically disjoint
-        # from the query). Only pulled when tag boosting is active, and bounded.
+        # Tag-first candidate expansion: chunks that carry an activated tag but
+        # fell outside the vector top-k can still surface (e.g. 张娜升学 → 番职大,
+        # lexically disjoint from the query). `expand_tag_candidates` gates on tag
+        # presence (not text overlap) and is hard-bounded so a hub tag cannot
+        # flood the candidate pool.
         if tag_weight > 0:
-            extra = []
-            for tid, s in activated:
-                if s <= 0:
-                    continue
-                for row in conn.execute(
-                        "SELECT chunk_id FROM chunk_tags WHERE tag_id = ?", (tid,)).fetchall():
-                    cid = row['chunk_id']
-                    if cid in seen:
-                        continue
-                    seen.add(cid)
-                    meta = conn.execute("""
-                        SELECT c.id, c.content, c.file_id,
-                               COALESCE(f.diary_date, f.created_at) AS date,
-                               f.file_path, c.importance, c.access_count
-                        FROM chunks c JOIN files f ON c.file_id = f.id
-                        WHERE c.id = ?
-                    """, (cid,)).fetchone()
-                    if not meta:
-                        continue
-                    trows = conn.execute(
-                        "SELECT tag_id FROM chunk_tags WHERE chunk_id = ?", (cid,)).fetchall()
-                    tag_strength = sum(strength_map.get(t['tag_id'], 0.0) for t in trows)
-                    if tag_strength <= 0:
-                        continue
-                    date_str = meta['date'][:10] if meta['date'] else ''
-                    ts = _time_score(date_str)
-                    extra.append({
-                        'chunk_id': meta['id'],
-                        'content': meta['content'],
-                        'date': date_str,
-                        'file_path': meta['file_path'],
-                        'score': tag_weight * tag_strength + time_ratio * ts,
-                        'importance': meta['importance'] or 'medium',
-                        'access_count': meta['access_count'] or 0,
-                        'tag_strength': tag_strength,
-                        'time_score': ts,
-                    })
-            boosted.extend(extra)
+            boosted.extend(expand_tag_candidates(
+                conn, activated, strength_map, seen, tag_weight, time_ratio,
+                _time_score, cap=TAG_CANDIDATE_CAP))
 
         boosted.sort(key=lambda x: x['score'], reverse=True)
         return boosted[:final_k]
