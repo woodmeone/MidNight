@@ -5,6 +5,7 @@ fake implementation returns deterministic pseudo-vectors for testing.
 """
 import hashlib
 import json
+import os
 from typing import Optional
 
 
@@ -103,23 +104,131 @@ class SiliconFlowEmbeddingClient(EmbeddingClient):
         return [item['embedding'] for item in sorted_data]
 
 
+def _mean_pool_l2(token_emb: list, masks: list) -> list[list[float]]:
+    """Mean-pool non-padded token embeddings, then L2-normalize each sentence.
+
+    Pure function (no model needed) so it is unit-testable offline.
+    `token_emb` is nested [sentence][token][dim]; `masks` is [sentence][token]
+    of 0/1. Padded tokens (mask 0) are excluded from the mean.
+    """
+    out: list[list[float]] = []
+    for sent_emb, m in zip(token_emb, masks):
+        dim = len(sent_emb[0]) if sent_emb else 0
+        acc = [0.0] * dim
+        n = 0
+        for emb, flag in zip(sent_emb, m):
+            if not flag:
+                continue
+            for i in range(dim):
+                acc[i] += emb[i]
+            n += 1
+        vec = [a / n for a in acc] if n else [0.0] * dim
+        norm = sum(x * x for x in vec) ** 0.5
+        if norm:
+            vec = [x / norm for x in vec]
+        out.append(vec)
+    return out
+
+
+class LocalOnnxEmbeddingClient(EmbeddingClient):
+    """Real local embedding via ONNX Runtime — no cloud, no API key.
+
+    Loads a tokenizer (tokenizers lib) + ONNX model from `model_dir`.
+    Expected layout inside model_dir:
+        model.onnx      ONNX-exported embedding model (BAAI/bge-m3)
+        tokenizer.json  XLM-RoBERTa / bge-m3 tokenizer
+        config.json     optional; may carry "hidden_size" (= dimension)
+
+    `embed` runs forward pass, mean-pools non-padded tokens and L2-normalizes.
+    """
+
+    def __init__(self, dimension: int = 1024, model_dir: str = "",
+                 max_length: int = 8192):
+        super().__init__(dimension=dimension, model="bge-m3-local")
+        if not model_dir or not os.path.isdir(model_dir):
+            raise ValueError(
+                f"Local ONNX embedding requested but model_dir not found: "
+                f"{model_dir!r}. Set MIDNIGHT_MODEL_DIR (or pass model_dir) "
+                f"to a directory containing model.onnx + tokenizer.json."
+            )
+        onnx_path = os.path.join(model_dir, 'model.onnx')
+        tok_path = os.path.join(model_dir, 'tokenizer.json')
+        if not os.path.exists(onnx_path):
+            raise ValueError(f"model.onnx missing in {model_dir!r}")
+        if not os.path.exists(tok_path):
+            raise ValueError(f"tokenizer.json missing in {model_dir!r}")
+
+        import onnxruntime  # local import keeps pure unit tests dependency-light
+        import numpy as np
+        from tokenizers import Tokenizer
+        self._np = np
+        self._sess = onnxruntime.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
+        inputs = {i.name for i in self._sess.get_inputs()}
+        # auto-detect input names: tokens + mask are the two common ones
+        self._tok_name = next((n for n in inputs if 'token' in n or n == 'input_ids'), None)
+        self._mask_name = next((n for n in inputs if 'mask' in n or n == 'attention_mask'), None)
+        if self._tok_name is None or self._mask_name is None:
+            names = sorted(inputs)
+            if len(names) >= 2:
+                self._tok_name, self._mask_name = names[0], names[1]
+            else:
+                raise ValueError(f"unexpected ONNX graph inputs: {names}")
+        self._tok = Tokenizer.from_file(tok_path)
+        self._pad_id = self._tok.token_to_id('[PAD]') or 1
+        self.max_length = max(1, int(max_length or 8192))
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        np = self._np
+        toks = self._tok.encode_batch([str(t) for t in texts])
+        input_ids = [t.ids[: self.max_length] for t in toks]
+        maxlen = max(len(x) for x in input_ids) if input_ids else 0
+        batch = np.array(
+            [ids + [self._pad_id] * (maxlen - len(ids)) for ids in input_ids],
+            dtype=np.int64,
+        )
+        masks = np.array(
+            [[1] * len(ids) + [0] * (maxlen - len(ids)) for ids in input_ids],
+            dtype=np.int64,
+        )
+        if maxlen == 0:
+            return [[0.0] * self.dimension for _ in texts]
+        out = self._sess.run(None, {self._tok_name: batch, self._mask_name: masks})
+        # [batch, seq, hidden] -> mean_pool + L2 normalize
+        hidden = out[0].tolist()
+        return _mean_pool_l2(hidden, masks.tolist())
+
+
 def load_embedding_client(config: Optional[dict] = None) -> EmbeddingClient:
     """Factory: load embedding client from config dict.
 
     Config format:
         {
+            "backend": "onnx"|"api"|"fake" (optional; default from env MIDNIGHT_EMBEDDING),
             "api_url": "https://api.siliconflow.cn/v1",
             "api_key": "sk-...",
             "model": "BAAI/bge-m3",
+            "model_dir": "~/.midnight/models/bge-m3",  # for backend=onnx
             "dimension": 1024
         }
-    If config is None or empty, returns FakeEmbeddingClient (for testing/offline).
+    Selection (backward-compatible):
+      - backend == local/onnx  -> LocalOnnxEmbeddingClient (raises if model missing)
+      - api_key present        -> SiliconFlowEmbeddingClient
+      - otherwise              -> FakeEmbeddingClient (testing/offline)
+    If config is None, defaults to FakeEmbeddingClient.
     """
-    if not config or not config.get('api_key'):
-        return FakeEmbeddingClient(dimension=config.get('dimension', 1024) if config else 1024)
-    return SiliconFlowEmbeddingClient(
-        dimension=config.get('dimension', 1024),
-        api_url=config.get('api_url', ''),
-        api_key=config.get('api_key', ''),
-        model=config.get('model', 'BAAI/bge-m3')
-    )
+    config = config or {}
+    backend = (config.get('backend') or os.environ.get('MIDNIGHT_EMBEDDING') or '').strip().lower()
+    dimension = int(config.get('dimension', 1024) or 1024)
+
+    if backend in ('local', 'onnx'):
+        model_dir = config.get('model_dir') or os.environ.get('MIDNIGHT_MODEL_DIR', '')
+        return LocalOnnxEmbeddingClient(dimension=dimension, model_dir=model_dir)
+
+    if config.get('api_key'):
+        return SiliconFlowEmbeddingClient(
+            dimension=dimension,
+            api_url=config.get('api_url', ''),
+            api_key=config.get('api_key', ''),
+            model=config.get('model', 'BAAI/bge-m3')
+        )
+    return FakeEmbeddingClient(dimension=dimension)
