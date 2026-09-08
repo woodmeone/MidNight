@@ -10,6 +10,9 @@ __pycache__/
 ~/.midnight/
 .midnight/
 
+# 本地 embedding 模型（2.2GB，不进 git，用 download_bge_m3.py 拉取）
+skills/recall/models/
+
 # 本地配置
 config.env
 .env

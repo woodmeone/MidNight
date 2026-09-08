@@ -49,6 +49,30 @@ def download(url: str, dest_path: str) -> None:
         raise RuntimeError(f'download produced an empty/missing file: {dest_path}')
 
 
+def _complete(output_dir: str) -> bool:
+    return all(
+        os.path.isfile(os.path.join(output_dir, name)) and
+        os.path.getsize(os.path.join(output_dir, name)) > 0
+        for name, _ in FILES
+    )
+
+
+def download_model(output_dir: str, endpoint: str = '') -> str:
+    """Download bge-m3 ONNX into `output_dir` and return the absolute path.
+
+    `endpoint` overrides the HF base (default: HF_ENDPOINT, then HF official).
+    Uses resumable curl so re-runs can continue an interrupted download.
+    """
+    out = os.path.abspath(os.path.expanduser(output_dir))
+    os.makedirs(out, exist_ok=True)
+    base = _resolvable_endpoint(endpoint or os.environ.get('HF_ENDPOINT') or DEFAULT_ENDPOINT)
+    for local_name, remote_path in FILES:
+        download(f'{base}/{remote_path}', os.path.join(out, local_name))
+    if not _complete(out):
+        raise RuntimeError(f'model download incomplete in {out}')
+    return out
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -58,15 +82,11 @@ def main(argv=None) -> int:
                    help=f'HuggingFace base URL (default {DEFAULT_ENDPOINT})')
     args = p.parse_args(argv)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    base = _resolvable_endpoint(args.endpoint)
-    for local_name, remote_path in FILES:
-        url = f'{base}/{remote_path}'
-        download(url, os.path.join(args.output_dir, local_name))
+    download_model(args.output_dir, args.endpoint)
 
-    print('\nDone. Now run somese of:')
+    print('\nDone. Point recall at it with:')
     print('  $env:MIDNIGHT_EMBEDDING="local"')
-    print(f'  $env:MIDNIGHT_MODEL_DIR="{args.output_dir}"')
+    print(f'  $env:MIDNIGHT_MODEL_DIR="{os.path.abspath(args.output_dir)}"')
     print('  python skills/recall/scripts/reembed.py --all')
     return 0
 

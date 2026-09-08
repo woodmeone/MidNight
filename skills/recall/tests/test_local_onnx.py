@@ -186,3 +186,81 @@ class TestLocalOnnxAdversarial:
         assert len(short) == 1024 and len(long_) == 1024
         assert abs(short[0] - 1.0) < 1e-6   # pads excluded from the mean
         assert abs(long_[0] - 1.0) < 1e-6   # all real tokens -> still 1.0
+
+
+class TestLocalModelResolution:
+    """3-tier local model resolution: explicit -> skill dir -> user dir -> auto."""
+
+    @staticmethod
+    def _complete_dir(path, names=('model.onnx', 'model.onnx_data', 'tokenizer.json')):
+        path.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (path / n).write_text('x')
+        return path
+
+    @staticmethod
+    def _pin(monkeypatch, tmp_path, skill, user):
+        monkeypatch.setattr(emb, '_skill_model_dir', lambda: str(skill))
+        monkeypatch.setattr(emb, '_user_model_dir', lambda: str(user))
+
+    def test_candidate_order_skill_then_user(self, tmp_path):
+        cands = emb._model_candidates()
+        assert len(cands) == 2
+        assert str(emb._skill_model_dir()) == cands[0]
+        assert str(emb._user_model_dir()) == cands[1]
+
+    def test_complete_requires_all_three(self, tmp_path):
+        assert not emb._model_complete(str(tmp_path))
+        self._complete_dir(tmp_path / 'a', names=('model.onnx', 'tokenizer.json'))
+        assert not emb._model_complete(str(tmp_path / 'a'))  # missing onnx_data
+        self._complete_dir(tmp_path / 'b')
+        assert emb._model_complete(str(tmp_path / 'b'))
+
+    def test_explicit_incomplete_raises(self, tmp_path, monkeypatch):
+        monkeypatch.delenv('MIDNIGHT_MODEL_DIR', raising=False)
+        from scripts.embedding import load_embedding_client
+        monkeypatch.setenv('MIDNIGHT_MODEL_DIR', str(tmp_path))  # empty dir
+        with pytest.raises(ValueError):
+            load_embedding_client({'backend': 'local'})
+
+    def test_uses_skill_dir_first(self, tmp_path, monkeypatch):
+        s = self._complete_dir(tmp_path / 's')
+        self._complete_dir(tmp_path / 'u')
+        self._pin(monkeypatch, tmp_path, s, tmp_path / 'u')
+        monkeypatch.delenv('MIDNIGHT_MODEL_DIR', raising=False)
+        assert emb._resolve_local_model_dir(None) == str(s)
+
+    def test_falls_back_to_user_dir(self, tmp_path, monkeypatch):
+        (tmp_path / 's').mkdir(parents=True)  # skill dir incomplete/empty
+        u = self._complete_dir(tmp_path / 'u')
+        self._pin(monkeypatch, tmp_path, tmp_path / 's', u)
+        monkeypatch.delenv('MIDNIGHT_MODEL_DIR', raising=False)
+        assert emb._resolve_local_model_dir(None) == str(u)
+
+    def test_no_model_raises_when_autodownload_off(self, tmp_path, monkeypatch):
+        (tmp_path / 's').mkdir(parents=True)
+        (tmp_path / 'u').mkdir(parents=True)
+        self._pin(monkeypatch, tmp_path, tmp_path / 's', tmp_path / 'u')
+        monkeypatch.delenv('MIDNIGHT_MODEL_DIR', raising=False)
+        monkeypatch.setenv('MIDNIGHT_EMBEDDING_AUTO_DOWNLOAD', '0')
+        with pytest.raises(ValueError) as ei:
+            emb._resolve_local_model_dir(None)
+        assert 'no model found' in str(ei.value)
+
+    def test_autodownload_when_enabled(self, tmp_path, monkeypatch):
+        (tmp_path / 's').mkdir(parents=True)
+        (tmp_path / 'u').mkdir(parents=True)
+        self._pin(monkeypatch, tmp_path, tmp_path / 's', tmp_path / 'u')
+        monkeypatch.delenv('MIDNIGHT_MODEL_DIR', raising=False)
+        monkeypatch.setenv('MIDNIGHT_EMBEDDING_AUTO_DOWNLOAD', '1')
+        calls = []
+
+        def fake_download(target):
+            calls.append(target)
+            self._complete_dir(tmp_path / 'u')
+            return str(tmp_path / 'u')
+
+        import scripts.download_bge_m3 as dlmod
+        monkeypatch.setattr(dlmod, 'download_model', fake_download)
+        assert emb._resolve_local_model_dir(None) == str(tmp_path / 'u')
+        assert calls == [str(tmp_path / 'u')]

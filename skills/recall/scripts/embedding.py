@@ -6,6 +6,7 @@ fake implementation returns deterministic pseudo-vectors for testing.
 import hashlib
 import json
 import os
+import sys
 from typing import Optional
 
 
@@ -198,6 +199,89 @@ class LocalOnnxEmbeddingClient(EmbeddingClient):
         return _mean_pool_l2(hidden, masks.tolist())
 
 
+def _model_complete(model_dir: str) -> bool:
+    """A usable local model needs the graph, the weights and the tokenizer."""
+    if not model_dir or not os.path.isdir(model_dir):
+        return False
+    for name in ('model.onnx', 'model.onnx_data', 'tokenizer.json'):
+        p = os.path.join(model_dir, name)
+        if not os.path.isfile(p) or os.path.getsize(p) == 0:
+            return False
+    return True
+
+
+def _skill_model_dir() -> str:
+    """Model dir shipped beside the skill package (skills/recall/models/bge-m3)."""
+    return os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'models', 'bge-m3'))
+
+
+def _user_model_dir() -> str:
+    """Per-user global drop target: ~/.midnight/models/bge-m3."""
+    return os.path.join(os.path.expanduser('~'), '.midnight', 'models', 'bge-m3')
+
+
+def _model_candidates() -> list[str]:
+    """Ordered search list: skill-local first, then per-user global."""
+    return [_skill_model_dir(), _user_model_dir()]
+
+
+def _auto_download_enabled() -> bool:
+    val = os.environ.get('MIDNIGHT_EMBEDDING_AUTO_DOWNLOAD', '1').strip().lower()
+    return val not in ('0', 'false', 'no', 'off')
+
+
+def _get_downloader():
+    """Return the download_bge_m3 module (single instance on both sys.path layouts).
+
+    Both `download_bge_m3` and `scripts.download_bge_m3` can resolve to the same
+    file, but as two distinct module objects. Reading from sys.modules first
+    keeps a single instance here (and lets tests patch it deterministically).
+    """
+    if 'download_bge_m3' in sys.modules:
+        return sys.modules['download_bge_m3']
+    if 'scripts.download_bge_m3' in sys.modules:
+        return sys.modules['scripts.download_bge_m3']
+    try:
+        import download_bge_m3 as m
+    except ImportError:
+        import scripts.download_bge_m3 as m
+    return m
+
+
+def _resolve_local_model_dir(config: Optional[dict]) -> str:
+    """3-tier local model resolution:
+      1. explicit model_dir env/config (highest priority, required to exist)
+      2. skill-local models dir
+      3. per-user ~/.midnight/models/bge-m3
+      else auto-download into the per-user dir (unless auto-download disabled).
+    """
+    explicit = config.get('model_dir') if config else None
+    explicit = explicit or os.environ.get('MIDNIGHT_MODEL_DIR', '')
+    if explicit:
+        if not _model_complete(explicit):
+            raise ValueError(
+                f"MIDNIGHT_MODEL_DIR points at {explicit!r} but it's missing "
+                f"model.onnx, model.onnx_data or tokenizer.json. Re-run "
+                f"python skills/recall/scripts/download_bge_m3.py --output-dir {explicit!r}")
+        return explicit
+    for cand in _model_candidates():
+        if _model_complete(cand):
+            return cand
+    if _auto_download_enabled():
+        target = _user_model_dir()
+        print(f'[recall] local model not found; auto-downloading bge-m3 -> {target}', flush=True)
+        _get_downloader().download_model(target)
+        if not _model_complete(target):
+            raise ValueError('auto-download finished but model files are incomplete')
+        return target
+    raise ValueError(
+        'Local ONNX embedding requested but no model found. Install one via '
+        'python skills/recall/scripts/download_bge_m3.py --output-dir '
+        '~/.midnight/models/bge-m3 , or point MIDNIGHT_MODEL_DIR at an existing '
+        'copy. (Set MIDNIGHT_EMBEDDING_AUTO_DOWNLOAD=0 to disable auto-download.)')
+
+
 def load_embedding_client(config: Optional[dict] = None) -> EmbeddingClient:
     """Factory: load embedding client from config dict.
 
@@ -221,7 +305,7 @@ def load_embedding_client(config: Optional[dict] = None) -> EmbeddingClient:
     dimension = int(config.get('dimension', 1024) or 1024)
 
     if backend in ('local', 'onnx'):
-        model_dir = config.get('model_dir') or os.environ.get('MIDNIGHT_MODEL_DIR', '')
+        model_dir = _resolve_local_model_dir(config)
         return LocalOnnxEmbeddingClient(dimension=dimension, model_dir=model_dir)
 
     if config.get('api_key'):
