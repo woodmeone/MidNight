@@ -61,6 +61,27 @@ CREATE TABLE IF NOT EXISTS tag_edges (
     PRIMARY KEY (tag_from_id, tag_to_id)
 );
 
+-- 倒排索引：chunk 正文的字面 n-gram → chunk，供召回候选预筛（T4）。
+CREATE TABLE IF NOT EXISTS chunk_ngrams (
+    chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    ngram TEXT NOT NULL,
+    PRIMARY KEY (chunk_id, ngram)
+) WITHOUT ROWID;
+
+-- 键值元数据：存 cache_generation（每次 ingest 递增，用于结果缓存失效）。
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- 结果缓存：key=查询参数指纹，generation=写入时的缓存代数，ts=写入时间。
+CREATE TABLE IF NOT EXISTS recall_cache (
+    key TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL,
+    result TEXT NOT NULL,
+    ts TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
 CREATE INDEX IF NOT EXISTS idx_tag_cooccurrence_weight ON tag_cooccurrence(weight DESC);
@@ -68,6 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_tag_edges_from ON tag_edges(tag_from_id);
 CREATE INDEX IF NOT EXISTS idx_tag_edges_to ON tag_edges(tag_to_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_importance ON chunks(importance);
 CREATE INDEX IF NOT EXISTS idx_chunks_access ON chunks(access_count DESC);
+CREATE INDEX IF NOT EXISTS idx_chunk_ngrams_ngram ON chunk_ngrams(ngram);
 """
 
 

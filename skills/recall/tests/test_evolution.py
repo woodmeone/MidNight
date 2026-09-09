@@ -96,7 +96,7 @@ def test_evolution_log_append_history(agent):
 
 
 def test_decay_fresh_stays_old_fades(agent):
-    """久不用衰减：新鲜边不动，过期边降权，过期弱边删除"""
+    """久不用衰减：新鲜边不动，过期边降权，过期弱边**降到 floor 但不删除**"""
     db = cfg.get_db_path(agent)
     init_db(db)
     conn = sqlite3.connect(db)
@@ -111,7 +111,7 @@ def test_decay_fresh_stays_old_fades(agent):
     conn.execute(
         "INSERT INTO tag_edges (tag_from_id, tag_to_id, weight, updated_at) "
         "VALUES (2, 1, 1.0, datetime('now', '-200 days'))")
-    # 过期弱边 c->d：200 天前, weight 0.08 → 0.04 → 删除（floor 0.05）
+    # 过期弱边 c->d：200 天前, weight 0.08 → 0.04 → 钳到 floor 0.05（保留，不删除）
     conn.execute(
         "INSERT INTO tag_edges (tag_from_id, tag_to_id, weight, updated_at) "
         "VALUES (3, 4, 0.08, datetime('now', '-200 days'))")
@@ -124,9 +124,30 @@ def test_decay_fresh_stays_old_fades(agent):
 
     assert rows['1-2'] == 1.0, "新鲜边不应被衰减"
     assert rows['2-1'] == pytest.approx(0.5), "过期边应降权"
-    assert '3-4' not in rows, "过期弱边应被删除"
-    assert result['decayed'] >= 2
-    assert result['removed'] == 1
+    assert rows['3-4'] == pytest.approx(0.05), "过期弱边应钳到 floor，而非被删除"
+    assert result['decayed'] == 2
+    assert result['floored'] == 1
+
+
+def test_decay_never_deletes_any_edge(agent):
+    """对抗：衰减/钳制绝不减少关联边数量——弱关联沉底但仍在。"""
+    db = cfg.get_db_path(agent)
+    init_db(db)
+    conn = sqlite3.connect(db)
+    for name in ('a', 'b', 'c', 'd'):
+        conn.execute("INSERT INTO tags (name) VALUES (?)", (name,))
+    conn.executemany(
+        "INSERT INTO tag_edges (tag_from_id, tag_to_id, weight, updated_at) "
+        "VALUES (?, ?, ?, datetime('now', '-300 days'))",
+        [(1, 2, 0.001), (2, 3, 0.02), (3, 4, 0.5)])
+    conn.commit()
+    before = conn.execute("SELECT COUNT(*) FROM tag_edges").fetchone()[0]
+
+    result = decay_stale_edges(db, stale_days=90, factor=0.5, floor=0.05)
+    after = conn.execute("SELECT COUNT(*) FROM tag_edges").fetchone()[0]
+    conn.close()
+    assert after == before, "衰减后关联边数量必须不变（非破坏）"
+    assert result['decayed'] == 3
 
 
 def test_decay_stale_cooccurrence_too(agent):

@@ -76,8 +76,17 @@ def _hub_scale(hub_inflow: float) -> float:
 
 def activate_tags(query_vec, db_path: str, embedding_client,
                   decay: float = 0.5, max_depth: int = 2, threshold: float = 0.1,
-                  initial_hits: int = 5) -> list[tuple[int, float]]:
+                  initial_hits: int = 5, expand_neighbors: bool = False,
+                  neighbor_cap: int = 0, depth_decay: float = 1.0) -> list[tuple[int, float]]:
     """Pulse-propagate activation from pre-sensed seed tags along directed edges.
+
+    新增（Iter-2，皆默认关闭，开启才改变行为）：
+    - `expand_neighbors=True, neighbor_cap>0`（B）：用**已激活核心标签的向量**再扫一遍
+      tag 池，把"词面不同但向量相近"的旁支标签以 ghost 强度 soft 激活加入传播，扩大
+      联想半径（如「升学」靠向量带出「3+证书/志愿」这类无直接边的标签）。默认关，避免
+      向量相近就乱带入。
+    - `depth_decay<1`（C）：每次跳跃在前一跳基础上再乘 depth_decay，使二跳及以上
+      额外衰减，压住"两跳漫游到无关枢纽"；`1.0` 时逐位等于旧行为。
 
     Returns list of (tag_id, cumulative_strength) sorted desc, including
     core/ghost seeds and every tag reached above `threshold`.
@@ -112,6 +121,30 @@ def activate_tags(query_vec, db_path: str, embedding_client,
         if not core:
             return []
 
+        # B · 邻居（soft）预感知：默认关闭；开启时用**激活种子（core+ghost）的向量**
+        #     把"与某已激活标签向量相近、但本身既不贴近 query、也无直达边"的旁支
+        #     标签以 ghost 强度拉进传播，扩大联想半径。对 bag-of-chars 嵌入，它与
+        #     ghost 预感知部分重叠；但对 BGE 等语义嵌入，能补"词面不同、语义近"。
+        neighbor_gids: list[int] = []
+        if expand_neighbors and neighbor_cap > 0:
+            seed_ids = list(core) + list(ghosts)
+            seed_set = set(seed_ids)
+            seed_vec = {r[0]: _deserialize(r[2]) for r in rows
+                        if r[0] in seed_set and r[2]}
+            agg: dict[int, bool] = {}
+            for tid, v in seed_vec.items():
+                cand = []
+                for rid, _rname, rvec in rows:
+                    if rid in seed_set or rid == tid or not rvec:
+                        continue
+                    s = _cosine(v, _deserialize(rvec))
+                    if s >= ghost_floor:
+                        cand.append((rid, s))
+                cand.sort(key=lambda x: x[1], reverse=True)
+                for rid, _s in cand[:neighbor_cap]:
+                    agg[rid] = True
+            neighbor_gids = list(agg)
+
         # 2. Pre-compute hub in-flow (raw evidence) for hub correction.
         hub_inflow: dict[int, float] = {}
         for from_id, to_id, w in conn.execute(
@@ -139,16 +172,19 @@ def activate_tags(query_vec, db_path: str, embedding_client,
             strength[tid] = strength.get(tid, 0.0) + 1.0
         for tid in ghosts:
             strength[tid] = strength.get(tid, 0.0) + GHOST_STRENGTH
-        frontier = [(tid, strength[tid]) for tid in core + ghosts]
+        for tid in neighbor_gids:
+            strength[tid] = strength.get(tid, 0.0) + GHOST_STRENGTH
+        frontier = [(tid, strength[tid]) for tid in core + ghosts + neighbor_gids]
 
         for _depth in range(1, max_depth + 1):
             received: dict[int, float] = {}
+            hop_factor = decay * (depth_decay ** (_depth - 1))  # C · 深跳额外衰减
             for tid, s in frontier:
                 edges = _out_edges(tid)
                 total_w = sum(w for _, w in edges)
                 if total_w <= 0 or s <= 0:
                     continue
-                budget = s * decay  # fixed outflow budget: no unbounded fan-out
+                budget = s * hop_factor  # fixed outflow budget: no unbounded fan-out
                 for to_id, eff in edges:
                     pulse = budget * eff / total_w
                     if pulse > 0:
