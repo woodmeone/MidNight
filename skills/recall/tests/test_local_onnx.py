@@ -78,11 +78,15 @@ class TestMeanPoolL2:
 
 
 class TestRouting:
-    def test_default_still_fake(self):
+    def test_default_still_fake(self, monkeypatch):
+        # Users commonly set MIDNIGHT_EMBEDDING=local as their default; the
+        # no-op default contract must be tested without that env present.
+        monkeypatch.delenv('MIDNIGHT_EMBEDDING', raising=False)
         assert isinstance(load_embedding_client({}), FakeEmbeddingClient)
         assert isinstance(load_embedding_client(None), FakeEmbeddingClient)
 
-    def test_api_key_still_siliconflow(self):
+    def test_api_key_still_siliconflow(self, monkeypatch):
+        monkeypatch.delenv('MIDNIGHT_EMBEDDING', raising=False)
         client = load_embedding_client({'api_key': 'sk-test', 'api_url': 'https://test.api'})
         assert isinstance(client, SiliconFlowEmbeddingClient)
 
