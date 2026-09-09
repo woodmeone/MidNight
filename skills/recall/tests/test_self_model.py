@@ -92,3 +92,68 @@ def test_update_mutable_only_rejects_immutable(agent):
     data = read_self(agent)
     assert data['name'] == original['name']
     assert data['anchor_tags'] == original['anchor_tags']
+
+
+def test_ensure_self_serializes_read_only(agent, basedir):
+    """新 self.md 应在 frontmatter 显式声明 read_only，且读回含定海锚字段"""
+    ensure_self(agent)
+    path = get_self_path(agent)
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    assert 'read_only:' in content
+    data = read_self(agent)
+    for key in ('name', 'anchor_tags', 'description'):
+        assert key in data['read_only']
+
+
+def test_backcompat_existing_self_without_read_only(agent):
+    """无 read_only 字段的旧 self.md 读回时默认保护定海锚（不破坏既有数据）"""
+    ensure_self(agent)
+    path = get_self_path(agent)
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    # 手动删掉 read_only 行，模拟旧版自建 self.md
+    content = '\n'.join(
+        line for line in content.splitlines() if not line.startswith('read_only:')
+    )
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(content)
+    data = read_self(agent)
+    assert 'name' in data['read_only']      # 仍默认保护
+    assert 'description' in data['read_only']
+
+    # 旧文件上改定海锚依然被拒
+    result = update_self(agent, {'name': 'evil'})
+    assert 'name' in result['rejected']
+
+
+def test_update_respects_file_read_only_override(agent):
+    """文件级 read_only 追加字段后，该字段被当成可动层的保护字段拒绝写入"""
+    ensure_self(agent)
+    path = get_self_path(agent)
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    # 按行定位 read_only 行，整行重写，把自建的 'position' 也声明为只读
+    lines = content.splitlines()
+    out = []
+    replaced = False
+    for line in lines:
+        if line.startswith('read_only:') and not replaced:
+            out.append('read_only: [anchor_tags, description, name, position]')
+            replaced = True
+        else:
+            out.append(line)
+    assert replaced, 'should have found read_only line'
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(out))
+
+    data = read_self(agent)
+    assert 'position' in data['read_only']
+
+    # position 已被声明只读 → mutable_only 下拒绝写入；其余可动层字段仍可写
+    result = update_self(agent, {'position': 'hacked', 'persona_style': '可改'})
+    assert result['updated'] is True          # persona_style 被应用
+    assert 'position' in result['rejected']    # position 被拒
+    assert 'persona_style' not in result['rejected']
+    data = read_self(agent)
+    assert 'position' not in data['mutable']   # 原值未被写进可动层

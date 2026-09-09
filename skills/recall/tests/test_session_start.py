@@ -89,3 +89,18 @@ def test_cli_with_self_prints_identity(agent, capsys):
     assert '[身份]' in out
     assert 'mira' in out
     assert '其余记忆靠联想召回' in out
+
+
+def test_summary_contains_memory_capability_anchor(agent):
+    """摘要应告知智能体的记忆锚点能力：持久化写日记 + 联想召回 + 只读定海锚"""
+    ensure_self(agent, defaults={
+        'name': 'mira',
+        'anchor_tags': ['midnight'],
+        'mutable': {'persona_style': '冷静高效'},
+    })
+    summary = compile_identity_summary(agent)
+    assert '长期记忆' in summary
+    assert '自动写日记' in summary
+    assert '联想召回' in summary
+    assert '只读' in summary         # 让智能体知道定海锚受保护
+    assert '可动层' in summary        # 与只读形成对比

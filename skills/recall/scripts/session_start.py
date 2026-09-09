@@ -24,6 +24,15 @@ GUIDANCE_TEXT = (
     "或直接告诉我你希望我是什么样的人。其余记忆靠联想召回。"
 )
 
+# 记忆锚点能力告知：让智能体在与用户对话时明确知道自己拥有"写日记持久化 + 联想召回 + self 演化"
+# 这三项能力，并且 self 的定海锚层只读受保护。借鉴 VCP 的能力注入与 Letta 的 read_only 语义。
+CAPABILITY_ANCHOR_TEXT = (
+    "我是带长期记忆的智能体：我会在对话里挑有价值的内容自动写日记持久化"
+    "（一事一记、时间取真、标签锚定联想），回复前可按当前话题联想召回相关历史，"
+    "并持续演化自我。我的记忆锚：定海锚（name/锚标签/自描述）只读受保护，"
+    "风格/能力/边界等可动层可随经历演化。"
+)
+
 
 def compile_identity_summary(agent: str = None) -> str:
     """Compile self.md's key fields into an identity digest.
@@ -53,7 +62,7 @@ def compile_identity_summary(agent: str = None) -> str:
         parts.append(f"风格:{persona_style}")
     if cap_str:
         parts.append(f"能力:{cap_str}")
-    return '；'.join(parts)
+    return '；'.join(parts) + '。' + CAPABILITY_ANCHOR_TEXT
 
 
 def main(argv=None) -> int:

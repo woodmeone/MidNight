@@ -48,13 +48,21 @@ def _parse_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(',') if item.strip()]
 
 
+def _resolve_read_only(fm_value: str) -> list[str]:
+    """Parse optional `read_only` frontmatter, falling back to immutable defaults."""
+    parsed = _parse_list(fm_value)
+    resolved = list(dict.fromkeys(list(parsed) + list(IMMUTABLE_KEYS)))
+    return resolved
+
+
 def _parse_self(content: str) -> dict:
-    """Parse self.md content into {name, anchor_tags, mutable, description}."""
+    """Parse self.md content into {name, anchor_tags, mutable, description, read_only}."""
     result = {
         'name': None,
         'anchor_tags': [],
         'mutable': {},
         'description': content.strip(),
+        'read_only': sorted(IMMUTABLE_KEYS),
     }
     m = _FRONTMATTER_PATTERN.match(content)
     if not m:
@@ -72,6 +80,8 @@ def _parse_self(content: str) -> dict:
             result['name'] = value
         elif key == 'anchor_tags':
             result['anchor_tags'] = _parse_list(value)
+        elif key == 'read_only':
+            result['read_only'] = _resolve_read_only(value)
         elif key == 'mutable':
             if value.startswith('{'):
                 try:
@@ -88,11 +98,13 @@ def _serialize_self(data: dict) -> str:
     name = data.get('name') or DEFAULT_TEMPLATE['name']
     anchor_tags = data.get('anchor_tags') or []
     mutable = data.get('mutable') or {}
+    read_only = _resolve_read_only(','.join(data.get('read_only') or []))
     desc = (data.get('description') or '').strip()
     lines = [
         '---',
         f"name: {name}",
         'anchor_tags: [' + ', '.join(anchor_tags) + ']',
+        'read_only: [' + ', '.join(sorted(read_only)) + ']',
         'mutable: ' + json.dumps(mutable, ensure_ascii=False),
         '---',
     ]
@@ -125,19 +137,20 @@ def update_self(agent: str = None, patch: dict | None = None,
                 mutable_only: bool = True) -> dict:
     """Merge patch into the mutable layer of self.md.
 
-    With mutable_only=True (default), immutable keys (name / anchor_tags /
-    description) are rejected and left untouched. Returns
-    {'updated': bool, 'rejected': [keys]}.
+    With mutable_only=True (default), fields declared in `read_only` frontmatter
+    (plus the built-in immutables name / anchor_tags / description) are rejected
+    and left untouched. Returns {'updated': bool, 'rejected': [keys]}.
     """
     patch = patch or {}
     if not os.path.exists(get_self_path(agent)):
         ensure_self(agent)
     data = read_self(agent)
     mutable = dict(data.get('mutable') or {})
+    protected = set(data.get('read_only') or []) | set(IMMUTABLE_KEYS)
     rejected = []
     applied = []
     for key, value in patch.items():
-        if mutable_only and key in IMMUTABLE_KEYS:
+        if mutable_only and key in protected:
             rejected.append(key)
             continue
         mutable[key] = value
