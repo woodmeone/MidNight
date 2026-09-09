@@ -5,10 +5,11 @@ research, or mirror feedback, the agent evaluates its self-image and rewrites
 the *mutable* layer of self.md. The 定海锚 (name / anchor_tags / description)
 is read-only — immutable keys are rejected and never overwritten.
 
-Also houses the "规则不固化" disuse decay (§4.B.4): association weights
+Also houses the "记忆保鲜" disuse decay (§4.B.4): association weights
 (tag_edges / tag_cooccurrence) that haven't been touched in a long time lose
-weight, and stale-weak edges are forgotten — instead of freezing rules into a
-rules.md file. No schema change: it reuses the existing `updated_at` columns.
+weight, and stale-weak edges are clamped to a floor — **降权不删除**，正文永远
+存在，旧印象自动淡出召回顶层。No schema change: it reuses the existing
+`updated_at` columns.
 
 CLI:
     python evolution.py --apply --feedback "..." --patch '{json}'
@@ -92,36 +93,47 @@ def read_evolution_log(agent: str = None) -> list[dict]:
     return entries
 
 
+def _decay_table(conn, table: str, weight_col: str, mod: str, factor: float) -> int:
+    """久未用（updated_at < mod）且权重>0 的关联边权重乘 factor。返回受影响行数。"""
+    cur = conn.execute(
+        f"UPDATE {table} SET {weight_col} = {weight_col} * ? "
+        f"WHERE updated_at < datetime('now', ?) AND {weight_col} > 0",
+        (factor, mod))
+    return cur.rowcount
+
+
+def _floor_table(conn, table: str, weight_col: str, floor: float) -> int:
+    """把低于 floor 的权重钳低到 floor —— 非破坏：只沉到极低，绝不在数据层删除。"""
+    cur = conn.execute(
+        f"UPDATE {table} SET {weight_col} = ? WHERE {weight_col} < ?",
+        (floor, floor))
+    return cur.rowcount
+
+
 def decay_stale_edges(db_path: str, stale_days: int = DEFAULT_STALE_DAYS,
                       factor: float = DEFAULT_DECAY_FACTOR,
                       floor: float = DEFAULT_FLOOR) -> dict:
-    """Decay association weights untouched for `stale_days`.
+    """非破坏记忆保鲜：久未用关联权重自动降权（不删除任何记录）。
 
-    Applies to tag_edges and tag_cooccurrence alike (keeps recall consistent).
-    Stale weights are multiplied by `factor`; those that then fall below
-    `floor` are deleted (stale + weak = forgotten).
-    Returns {'decayed': n, 'removed': n}.
+    对 tag_edges 与 tag_cooccurrence 一视同仁（保证召回一致）：
+      - 久未用（updated_at 早于 stale_days）且权重>0 的边，权重乘 `factor` 降权；
+      - 降权后低于 `floor` 的权重被**钳制到 floor**，只沉到极低、绝不 DELETE。
+
+    正文（chunks 表）是源真相，永远不变、永远可手动翻到；这里下降的只是
+    "关联/活跃权重"，让旧印象自动淡出召回顶层，而不是从记忆里消失。
+    Returns {'decayed': n, 'floored': n}.
     """
     conn = sqlite3.connect(db_path)
     try:
         conn.execute("PRAGMA foreign_keys=ON")
         mod = f'-{stale_days} days'
-        cur = conn.execute(
-            """UPDATE tag_edges SET weight = weight * ?
-               WHERE updated_at < datetime('now', ?) AND weight > ?""",
-            (factor, mod, 0.0))
-        decayed = cur.rowcount
-        cur = conn.execute("DELETE FROM tag_edges WHERE weight < ?", (floor,))
-        removed = cur.rowcount
-        cur = conn.execute(
-            """UPDATE tag_cooccurrence SET weight = weight * ?
-               WHERE updated_at < datetime('now', ?) AND weight > ?""",
-            (factor, mod, 0.0))
-        decayed += cur.rowcount
-        cur = conn.execute("DELETE FROM tag_cooccurrence WHERE weight < ?", (floor,))
-        removed += cur.rowcount
+        decayed = 0
+        floored = 0
+        for table in ('tag_edges', 'tag_cooccurrence'):
+            decayed += _decay_table(conn, table, 'weight', mod, factor)
+            floored += _floor_table(conn, table, 'weight', floor)
         conn.commit()
-        return {'decayed': decayed, 'removed': removed}
+        return {'decayed': decayed, 'floored': floored}
     finally:
         conn.close()
 
@@ -224,7 +236,7 @@ def main(argv=None) -> int:
     if action == 'decay':
         db_path = get_db_path(agent)
         if not os.path.exists(db_path):
-            print(json.dumps({'status': 'ok', 'decayed': 0, 'removed': 0}))
+            print(json.dumps({'status': 'ok', 'decayed': 0, 'floored': 0}))
             return 0
         result = decay_stale_edges(db_path, stale_days=stale_days, factor=factor, floor=floor)
         print(json.dumps({'status': 'ok', **result}))

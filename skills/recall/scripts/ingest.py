@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可
 
 from schema import init_db  # noqa: E402
 from scripts.config import get_db_path, get_dailynote_path, ensure_agent  # noqa: E402
+from scripts.ngrams import content_ngrams  # noqa: E402
+from scripts.cache import bump_generation  # noqa: E402
 from scripts.tag_network import (  # noqa: E402
     DISTANCE_LAMBDA, FORWARD_DAMP, REVERSE_DAMP, MAX_REVERSE_RATIO,
     _edge_contribution,
@@ -169,7 +171,12 @@ def ingest_file(file_path: str, db_path: str, embedding_client, conn: Optional[s
                 "INSERT INTO chunks (file_id, chunk_index, content, vector, importance) VALUES (?, ?, ?, ?, ?)",
                 (file_id, idx, chunk_text, _serialize_vector(vec), parsed['importance'])
             )
-            chunk_ids.append(cur.lastrowid)
+            cid = cur.lastrowid
+            chunk_ids.append(cid)
+            # 倒排索引 (T4)：把正文 n-gram 落盘，供召回候选预筛
+            conn.executemany(
+                "INSERT INTO chunk_ngrams (chunk_id, ngram) VALUES (?, ?)",
+                [(cid, gram) for gram in content_ngrams(chunk_text)])
 
         # Insert tags (upsert) and link to all chunks of this file
         tag_ids = []
@@ -237,6 +244,9 @@ def ingest_file(file_path: str, db_path: str, embedding_client, conn: Optional[s
                     (tag_ids[j], tag_ids[i], rev)
                 )
 
+        conn.commit()
+        # 真实写入后使结果缓存整体失效（代数 +1 并清空）
+        bump_generation(conn)
         conn.commit()
         return {
             'status': 'ingested',
