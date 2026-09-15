@@ -1,7 +1,7 @@
 # Midnight Skills — PROJECT（当前真相）
 
 > 本文件只回答"项目现在是什么样"。
-> 为什么变 → Issue/PR/Git 历史；术语 → `CONTEXT.md`；决策理由 → `docs/adr/`；进度与下一步 → `ROADMAP.md`。
+> 为什么变 → Issue/PR/Git 历史；术语 → `CONTEXT.md`；决策理由 → `docs/adr/`。
 
 ## 项目目标
 
@@ -63,4 +63,4 @@ recall 内部模块分工：
 
 ## 演进方向
 
-见 `ROADMAP.md`（进度追踪与下一步计划）。
+不设独立进度文件：意图与验收住 Issue（`.scratch/` + GitHub），合入即真相更新。当前开放中的是 Issue #2（PR #1，`feature/v2-self-object-memory`）：可移植召回核心，四票已全部交付。

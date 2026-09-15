@@ -53,4 +53,4 @@
 ## 相关文档
 
 - 当前真相（模块地图/流程/数据结构/约束）→ `PROJECT.md`
-- 决策理由 → `docs/adr/`；进度与下一步 → `ROADMAP.md`
+- 决策理由 → `docs/adr/`；进度与下一步 → Issue（`.scratch/` + GitHub）
