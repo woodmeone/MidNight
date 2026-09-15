@@ -16,10 +16,10 @@
 - [ ] SKILL.md 瘦身指引：写日记协议不变，召回调用改为推荐 `prep.py` 一条命令
 
 ## 票（垂直切片，按序实现）
-- [ ] 票1：SKILL.md frontmatter YAML 修复（4 个 skill） ｜ Blocked by: 无
-- [ ] 票2：多尺度线索提取（query 分解 + 合并激活） ｜ Blocked by: 无
-- [ ] 票3：MMR 多样性重排（注入前精排） ｜ Blocked by: 无
-- [ ] 票4：prep_for_reply 可移植核心 + CLI + SKILL.md 接入 ｜ Blocked by: 票2、票3
+- [x] 票1：SKILL.md frontmatter YAML 修复（4 个 skill） ｜ Blocked by: 无
+- [x] 票2：多尺度线索提取（query 分解 + 合并激活） ｜ Blocked by: 无
+- [x] 票3：MMR 多样性重排（注入前精排） ｜ Blocked by: 无
+- [x] 票4：prep_for_reply 可移植核心 + CLI + SKILL.md 接入 ｜ Blocked by: 票2、票3
 
 ## 范围外（本轮不做）
 - 不做运行时 hook/每轮强制自动注入（skill 形态无注入点，留待迁移阶段）
