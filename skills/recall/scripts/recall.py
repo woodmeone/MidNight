@@ -450,7 +450,8 @@ def recall_associative(query: str, db_path: str, embedding_client,
                        threshold: float = 0.1, time_ratio: float = 0.0,
                        truncate: float = 1.0, prefilter: bool = False,
                        cache: bool = False, expand_neighbors: bool = False,
-                       neighbor_cap: int = 0, depth_decay: float = 1.0) -> list[dict]:
+                       neighbor_cap: int = 0, depth_decay: float = 1.0,
+                       multi_scale: bool = False) -> list[dict]:
     """Associative recall: combine vector KNN results with tag pulse propagation
     and optional time weighting, truncation, and importance boosting.
 
@@ -458,15 +459,18 @@ def recall_associative(query: str, db_path: str, embedding_client,
     `cache=True` 命中则直接返回上一份结果（查询+参数 + 记忆未变时）。
     `expand_neighbors=True, neighbor_cap>0`（B）/ `depth_decay<1`（C）关闭时
     逐位等于旧行为——由调用方显式开启以获得更强的联想半径/深跳抑制。
+    `multi_scale=True`（票2）：把 query 拆成整句+片段多粒度，各自感应标签种子后
+    取最大相似合并激活，让藏在句子角落的细线索也能成为 core 种子。默认关闭，
+    关闭时逐位等于旧行为。
     """
-    from tag_network import activate_tags
+    from tag_network import activate_tags, multi_scale_queries
 
     if cache:
         key = _cache_key(db_path, query=query, k=k, tag_weight=tag_weight,
                          decay=decay, max_depth=max_depth, threshold=threshold,
                          time_ratio=time_ratio, truncate=truncate, prefilter=prefilter,
                          expand_neighbors=expand_neighbors, neighbor_cap=neighbor_cap,
-                         depth_decay=depth_decay)
+                         depth_decay=depth_decay, multi_scale=multi_scale)
         hit = cache_get(db_path, key)
         if hit is not None:
             return hit
@@ -479,10 +483,17 @@ def recall_associative(query: str, db_path: str, embedding_client,
         return []
 
     query_vec = embedding_client.embed([query])[0]
+    # 票2 · 多尺度线索提取：默认关闭；开启时子粒度向量并入种子感应（取最大相似）。
+    q_vecs = None
+    if multi_scale:
+        scales = multi_scale_queries(query)
+        if len(scales) > 1:
+            q_vecs = embedding_client.embed(scales)
     activated = activate_tags(query_vec, db_path, embedding_client,
                               decay=decay, max_depth=max_depth, threshold=threshold,
                               expand_neighbors=expand_neighbors,
-                              neighbor_cap=neighbor_cap, depth_decay=depth_decay)
+                              neighbor_cap=neighbor_cap, depth_decay=depth_decay,
+                              query_vecs=q_vecs)
 
     # 3. Combine scores
     conn = sqlite3.connect(db_path)

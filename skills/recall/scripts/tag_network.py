@@ -48,6 +48,45 @@ GHOST_BUDGET = 5             # how many ghost candidates to pre-sense
 CORE_RATIO = 0.25            # core seed must be ≥ this fraction of best-match similarity
 GHOST_RATIO = 0.05           # ghost candidate must be ≥ this fraction of best-match similarity
 
+# --- 多尺度线索提取（残差金字塔落地，票2）---
+MULTI_SCALE_MAX = 8          # 粒度总数硬上界（含整句），防粒度爆量
+MULTI_SCALE_MIN_LEN = 2      # 短于此的片段丢弃（单字无区分度）
+_SPLIT_PUNCT = '，。、；：！？…—～·,.;:!?|"（）()《》【】'
+
+
+def multi_scale_queries(text: str, max_scales: int = MULTI_SCALE_MAX) -> list[str]:
+    """把查询拆成多个语义粒度：整句在前，其后是标点/空白切分的片段。
+
+    动机：整句 embedding 会被主话题主导，藏在句子角落的细线索（如长句里的
+    「番职大」）只剩弱相似，单尺度感应只能给它 ghost 强度。拆出子粒度后各自
+    去感应标签，细线索有机会以 core 满强度成为召回种子。
+
+    纯函数、确定性：整句永远排第一；片段按原文出现序；去重；总数硬上界。
+    """
+    text = (text or '').strip()
+    if not text:
+        return []
+    scales = [text]
+    buf = []
+    for ch in text:
+        if ch.isspace() or ch in _SPLIT_PUNCT:
+            seg = ''.join(buf)
+            if len(seg) >= MULTI_SCALE_MIN_LEN and seg != text:
+                scales.append(seg)
+            buf = []
+        else:
+            buf.append(ch)
+    tail = ''.join(buf)
+    if len(tail) >= MULTI_SCALE_MIN_LEN and tail != text:
+        scales.append(tail)
+    seen = set()
+    out = []
+    for s in scales:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:max_scales]
+
 
 def _edge_contribution(pos_a: int, pos_b: int) -> float:
     """Per-file forward edge contribution: order potential × distance decay.
@@ -77,7 +116,8 @@ def _hub_scale(hub_inflow: float) -> float:
 def activate_tags(query_vec, db_path: str, embedding_client,
                   decay: float = 0.5, max_depth: int = 2, threshold: float = 0.1,
                   initial_hits: int = 5, expand_neighbors: bool = False,
-                  neighbor_cap: int = 0, depth_decay: float = 1.0) -> list[tuple[int, float]]:
+                  neighbor_cap: int = 0, depth_decay: float = 1.0,
+                  query_vecs: list = None) -> list[tuple[int, float]]:
     """Pulse-propagate activation from pre-sensed seed tags along directed edges.
 
     新增（Iter-2，皆默认关闭，开启才改变行为）：
@@ -87,6 +127,10 @@ def activate_tags(query_vec, db_path: str, embedding_client,
       向量相近就乱带入。
     - `depth_decay<1`（C）：每次跳跃在前一跳基础上再乘 depth_decay，使二跳及以上
       额外衰减，压住"两跳漫游到无关枢纽"；`1.0` 时逐位等于旧行为。
+    - `query_vecs=[...]`（票2 · 多尺度线索提取）：传入多条查询向量（整句 + 子粒度
+      片段）时，标签预感知取**各向量对同一标签的最大相似度**——藏在句子角落的细
+      线索只要任一粒度向量贴近某标签，该标签即可升为 core 满强度种子。默认 None =
+      仅用 query_vec 单尺度，行为逐位等于旧实现。
 
     Returns list of (tag_id, cumulative_strength) sorted desc, including
     core/ghost seeds and every tag reached above `threshold`.
@@ -98,10 +142,15 @@ def activate_tags(query_vec, db_path: str, embedding_client,
         if not rows:
             return []
 
+        # 多尺度：每个标签取各查询向量的最大相似度；None/单元素时逐位等于旧行为。
+        vecs = [query_vec] if not query_vecs else list(query_vecs)
         seed_scores = []
         for row in rows:
             vec = _deserialize(row[2])
-            score = _cosine(query_vec, vec) if vec else 0.0
+            if not vec:
+                seed_scores.append((row[0], 0.0))
+                continue
+            score = max((_cosine(qv, vec) for qv in vecs), default=0.0)
             seed_scores.append((row[0], score))
         seed_scores.sort(key=lambda x: x[1], reverse=True)
         top_score = seed_scores[0][1] if seed_scores else 0.0
