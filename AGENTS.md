@@ -13,8 +13,8 @@ Midnight Skills 是一组受 VCP(设计思想) 启发但完全原创的原子化
 
 ```
 midnight-skills/
-├── CONTEXT.md              # 领域词汇表 + 决策记录（术语/决策变更时更新）
-├── ROADMAP.md              # 进度追踪（Phase 1-4）
+├── CONTEXT.md              # 领域词汇表（只有术语）
+├── PROJECT.md              # 当前真相（模块地图/流程/数据结构/约束）
 ├── AGENTS.md               # 本文件
 ├── docs/
 │   ├── adr/                # 架构决策记录

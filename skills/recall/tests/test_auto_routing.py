@@ -52,15 +52,23 @@ def test_list_agents_fallback_to_name():
             cfg.BASE_DIR = old
 
 
-def test_auto_recall_selects_best_agent(embed):
-    """auto_recall 应选语义最匹配的 agent"""
+def test_auto_recall_selects_best_agent():
+    """auto_recall 应选语义+词面锚定都命中的 agent（而非无锚定的高相似噪声）。"""
+    from scripts.embedding import SemanticFakeEmbeddingClient
+    embed = SemanticFakeEmbeddingClient()
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         old = _set_base(tmpdir)
         try:
+            ensure_agent_dir('default')
+            d = cfg.get_agent_dir('default')
+            with open(os.path.join(d, 'agent.json'), 'w', encoding='utf-8') as f:
+                json.dump({'description': '用户日常记忆与心情记录'}, f)
+
             ensure_agent_dir('助教')
             d = cfg.get_agent_dir('助教')
             with open(os.path.join(d, 'agent.json'), 'w', encoding='utf-8') as f:
-                json.dump({'description': '辅导学习编程帮助做题解答问题'}, f)
+                json.dump({'description': '辅导学习编程帮助做题解答问题',
+                           'keywords': ['代码', '编程']}, f)
             fp = os.path.join(get_dailynote_path('助教'), 'd.md')
             with open(fp, 'w', encoding='utf-8') as f:
                 f.write("---\nmaid: t\ntags: [编程]\n---\nPython学习笔记")
@@ -78,8 +86,10 @@ def test_auto_recall_selects_best_agent(embed):
             os.unlink(fp)
 
             result = auto_recall("帮我看看这段Python代码怎么写", embed, k=5)
-            assert result['name'] is not None
+            # 助教有 代码 锚定且语义命中 → 应选中；导购无锚定不被信任
+            assert result['name'] == '助教'
             assert result['score'] > 0
+            assert result['ambiguous'] is False
         finally:
             cfg.BASE_DIR = old
 

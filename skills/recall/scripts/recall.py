@@ -12,7 +12,26 @@ _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from embedding 可用
 sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 from embedding import load_embedding_client  # noqa: E402
-from scripts.config import get_db_path, list_agents  # noqa: E402
+from scripts.config import (  # noqa: E402
+    get_db_path, list_agents, DEFAULT_AGENT, ensure_agent,
+)
+from scripts.ngrams import candidate_grams  # noqa: E402
+from scripts.cache import _cache_key, cache_get, cache_set  # noqa: E402
+
+# 词面锚定阈值：非 default agent 需与查询共享 ≥ 该数量的汉字才算"可信候选"，
+# 防止泛化/情绪化查询（无领域词）被 embedding 相似度误导而路由到某个私人 agent。
+ROUTE_ANCHOR_MIN_SHARED = 2
+
+# 标签候选扩增硬上界：单个 recall 最多把多少个「非向量 top-k」的标签承载 chunk
+# 提升为候选。防止高频枢纽标签（如「考试」挂在几十上百条日记上）把候选池撑爆。
+TAG_CANDIDATE_CAP = 8
+
+
+def _agent_chars(agent: dict) -> set:
+    """Agent 的领域字符集：description + keywords 去空格后的字符集合。"""
+    text = agent.get('description') or ''
+    text += ' ' + ' '.join(agent.get('keywords') or [])
+    return {c for c in text if not c.isspace()}
 
 
 def _deserialize_vector(blob: bytes) -> Optional[list[float]]:
@@ -32,8 +51,32 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def recall(query: str, db_path: str, embedding_client, k: int = 10) -> list[dict]:
-    """Vector similarity search. Returns list of {chunk_id, content, date, score, file_path, importance}."""
+def vector_candidate_ids(conn: sqlite3.Connection, query: str) -> Optional[set]:
+    """倒排索引候选预筛：返回与查询共享 ≥1 个字面 n-gram 的 chunk_id 集合。
+
+    只用倒排表（chunk_ngrams）定位"可能相关的一小摞"，避免每次召回全量扫 chunk。
+    若倒排表为空或查询无数值 gram，返回 None（调用方回退全量扫描，语义不变）。
+    """
+    grams = candidate_grams(query)
+    if not grams:
+        return None
+    placeholders = ','.join('?' * len(grams))
+    rows = conn.execute(
+        f"SELECT DISTINCT chunk_id FROM chunk_ngrams WHERE ngram IN ({placeholders})",
+        tuple(grams)).fetchall()
+    if not rows:
+        return None
+    return {r[0] for r in rows}
+
+
+def recall(query: str, db_path: str, embedding_client, k: int = 10,
+           prefilter: bool = False) -> list[dict]:
+    """Vector similarity search. Returns list of {chunk_id, content, date, score, file_path, importance}.
+
+    `prefilter=True` 时先用倒排索引把向量扫描收窄到与查询有字面重叠的候选子集，
+    降低随记忆量增长的 O(#chunks) 全量扫描。tag-first 语义不依赖本函数（词面
+    不可见的关联内容走 tag 扩增），故 prefilter 只优化词面候选的精排过程。
+    """
     # Ensure schema exists (open+close so Windows doesn't hold the file lock)
     from scripts.schema import init_db
     _init = init_db(db_path)
@@ -48,14 +91,34 @@ def recall(query: str, db_path: str, embedding_client, k: int = 10) -> list[dict
 
         query_vec = embedding_client.embed([query])[0]
 
+        cand = vector_candidate_ids(conn, query) if prefilter else None
+        if cand is not None and not cand:
+            return []  # 预筛结果为空 → 无词面候选，向量层无可精排
+
+        id_filter = ""
+        id_params = ()
+        if cand is not None:
+            ids = list(cand)
+            ph = ','.join('?' * len(ids))
+            id_filter = f" AND c.id IN ({ph})"
+            id_params = tuple(ids)
+
         rows = conn.execute("""
             SELECT c.id, c.content, c.file_id, COALESCE(f.diary_date, f.created_at) AS date,
                    f.file_path, c.importance, c.access_count
             FROM chunks c
             JOIN files f ON c.file_id = f.id
-        """).fetchall()
+            WHERE c.vector IS NOT NULL{filter}
+        """.format(filter=id_filter), id_params).fetchall()
 
-        vec_rows = conn.execute("SELECT id, vector FROM chunks WHERE vector IS NOT NULL").fetchall()
+        if cand is not None:
+            ph = ','.join('?' * len(ids))
+            vec_rows = conn.execute(
+                f"SELECT id, vector FROM chunks WHERE vector IS NOT NULL AND id IN ({ph})",
+                tuple(ids)).fetchall()
+        else:
+            vec_rows = conn.execute(
+                "SELECT id, vector FROM chunks WHERE vector IS NOT NULL").fetchall()
         vec_map = {row['id']: _deserialize_vector(row['vector']) for row in vec_rows}
 
         scored = []
@@ -85,45 +148,97 @@ def recall(query: str, db_path: str, embedding_client, k: int = 10) -> list[dict
         conn.close()
 
 
+def recall_by_identity(query: str, embedding_client, identity: str,
+                       k: int = 10, tag_weight: float = 0.3,
+                       time_ratio: float = 0.2, truncate: float = 1.0,
+                       prefilter: bool = False, cache: bool = False) -> list[dict]:
+    """Identity-preferred recall: 上层会话显式声明了「我是谁」就查谁的记忆区。
+
+    与 auto_recall 的关键差异：auto_recall 靠"查询文本 vs agent 描述"的语义相似度
+    去 *猜* 该查哪个库；本函数把身份当作确定性事实——身份指向的 agent 就是目标库，
+    不做任何猜库、不跨区。query 只在目标 agent 的库内做向量+标签脉冲召回。
+
+    隔离墙由此保持：青岚会话传 identity=qinglan 就永远查 qinglan 区，
+    mira 会话传 identity=mira 就永远查 mira 区，auto 的语义猜库不会再戳破分区。
+    """
+    if not identity:
+        return []
+    db_path = get_db_path(identity)
+    if not os.path.exists(db_path):
+        return []
+    results = recall_associative(query, db_path, embedding_client,
+                                 k=k, tag_weight=tag_weight,
+                                 time_ratio=time_ratio, truncate=truncate,
+                                 prefilter=prefilter, cache=cache,
+                                 decay=0.5, max_depth=2, threshold=0.1)
+    return results
+
+
 def auto_recall(query: str, embedding_client, k: int = 10,
                 tag_weight: float = 0.3, time_ratio: float = 0.2,
-                truncate: float = 1.0) -> dict:
+                truncate: float = 1.0, prefilter: bool = False,
+                cache: bool = False) -> dict:
     """Auto-route query to the best matching agent, then recall.
 
-    Scans all agents, semantically matches query to each agent's description,
-    picks the best match, and runs recall_associative on that agent's database.
+    Routing is anchored: a non-default agent must share ≥ ROUTE_ANCHOR_MIN_SHARED
+    characters with the query (description + optional keywords) to be a trusted
+    candidate. Generic / emotional queries without domain words therefore fall
+    back to the `default` agent (the user's own memory) instead of a random
+    niche agent — preventing cross-DB leakage of unrelated private memory.
 
-    Returns {agent, description, score, results}
+    Returns {name, description, score, ambiguous, results}
     """
     agents = list_agents()
     if not agents:
-        return {'name': None, 'description': None, 'score': 0, 'results': []}
+        return {'name': None, 'description': None, 'score': 0,
+                'ambiguous': True, 'results': []}
 
     query_vec = embedding_client.embed([query])[0]
+    q_chars = {c for c in query if not c.isspace()}
 
-    # Score each agent's description against the query
+    # Score each agent's description+keywords against the query + lexical anchor
     scored = []
     for agent in agents:
-        desc_vec = embedding_client.embed([agent['description']])[0]
+        route_text = agent['description']
+        if agent.get('keywords'):
+            route_text += ' ' + ' '.join(agent['keywords'])
+        desc_vec = embedding_client.embed([route_text])[0]
         score = cosine_similarity(query_vec, desc_vec)
-        scored.append({**agent, 'score': score})
+        anchor = len(q_chars & _agent_chars(agent))
+        scored.append({**agent, 'score': score, 'anchor': anchor})
 
-    scored.sort(key=lambda x: x['score'], reverse=True)
-    best = scored[0]
+    # 可信候选：default 恒为兜底；非 default 需有词面锚定
+    trusted = [a for a in scored
+               if a['name'] == DEFAULT_AGENT or a['anchor'] >= ROUTE_ANCHOR_MIN_SHARED]
+    if not trusted:
+        # 无 default 也无锚定 agent → 不猜，返回空 + ambiguous
+        return {'name': None, 'description': None, 'score': 0,
+                'ambiguous': True, 'results': []}
+
+    best = max(trusted, key=lambda a: (a['score'], a['anchor']))
+    # ambiguous = 本次靠 default 兜底（没有任何非 default agent 被词面锚定）
+    ambiguous = best['name'] == DEFAULT_AGENT and not any(
+        a['name'] != DEFAULT_AGENT and a['anchor'] >= ROUTE_ANCHOR_MIN_SHARED
+        for a in scored)
 
     # Run recall on the best agent's database
     db_path = get_db_path(best['name'])
     if not os.path.exists(db_path):
-        return {**best, 'results': []}
+        return {**best, 'ambiguous': ambiguous, 'results': []}
 
     results = recall_associative(query, db_path, embedding_client,
                                  k=k, tag_weight=tag_weight,
                                  time_ratio=time_ratio, truncate=truncate)
-    return {**best, 'results': results}
+    return {**best, 'ambiguous': ambiguous, 'results': results}
 
 
-def format_recall_output(results: list[dict], max_chars: int = 200) -> str:
-    """Format recall results as a context-injectable text block."""
+def format_recall_output(results: list[dict], max_chars: int = None) -> str:
+    """Format recall results as a context-injectable text block.
+
+    默认**保留完整 chunk，不硬截断**（语义优先：截断会在句子中间拦腰切断，破坏信息）。
+    只当调用方显式传 `max_chars` 时才按字符截断（向后兼容的历史兜底）；
+    上下文体积控制应走 `fit_to_budget` 的按预算收条，而不是靠截断单条。
+    """
     if not results:
         return "[回忆] 暂无相关记忆。"
 
@@ -131,94 +246,388 @@ def format_recall_output(results: list[dict], max_chars: int = 200) -> str:
     for r in results:
         date_part = f"（{r['date']}）" if r['date'] else ""
         content = r['content']
-        if len(content) > max_chars:
+        if max_chars is not None and len(content) > max_chars:
             content = content[:max_chars] + "…"
         lines.append(f"{date_part}{content}")
     return "\n\n".join(lines)
+
+
+def dedupe_results(results: list[dict]) -> list[dict]:
+    """注入前全局去重（对齐 VCP ResultDeduplicator 的硬去重）。
+
+    只去"真冗余"，不去"有关联的不同记忆"：
+      - 同一 chunk_id 只留一次（联想/标签命中会重复带出同一 chunk）；
+      - 规范化正文（去掉空白）相同视为重复，保留相关度更高的那条；
+      - 不同正文绝不删除——避免漏掉有效信息。
+    顺序保持召回相关度降序。
+    """
+    if not results:
+        return results
+    seen_ids = set()
+    seen_norm = set()
+    out = []
+    for r in results:
+        cid = r.get('chunk_id')
+        norm = ''.join((r.get('content') or '').split())
+        if cid is not None and cid in seen_ids:
+            continue
+        if norm in seen_norm:
+            continue
+        if cid is not None:
+            seen_ids.add(cid)
+        seen_norm.add(norm)
+        out.append(r)
+    return out
+
+
+def fit_to_budget(results: list[dict], budget_chars: int = None) -> list[dict]:
+    """预算收敛：在有限上下文预算内按相关度取「完整」条目。
+
+    - 该召回多少召回多少（recall_associative 内部不动，召回充足）；
+    - 注入前按预算从高到低收条，预算内每条保留完整正文，**绝不拦腰截断**；
+    - 对抗兜底：若最相关的一条单就超过预算，仍注入那一条（宁有一条完整，不返回空）。
+
+    这使 token 有硬上限（不会随召回量爆掉），同时又不损语义。
+    """
+    if not results or budget_chars is None or budget_chars <= 0:
+        return results
+    fitted = []
+    used = 0
+    for r in results:
+        length = len(r.get('content') or '')
+        if not fitted:              # 至少注入相关度最高的一条（单条超预算也完整保留）
+            fitted.append(r)
+            used = length
+            continue
+        if used + length > budget_chars:
+            break                   # 预算用尽即停，不再硬塞
+        fitted.append(r)
+        used += length
+    return fitted
+
+
+def mmr_rerank(candidates: list[dict], query_vec: list[float],
+               vec_map: dict, lambda_mult: float = 0.5,
+               k: Optional[int] = None) -> list[dict]:
+    """MMR（最大边际相关性）多样性重排——Ω 门控"信噪比"思想的落地。
+
+    贪心选择：每步取 `λ·rel(c) − (1−λ)·max_sim(c, 已选)` 最大的候选。
+    相关度 rel = cos(query_vec, 候选向量)（纯语义相关，不带标签/时间加成——
+    加成是召回阶段的联想信号，重排阶段只比"讲了多少不同的事"）；候选缺向量
+    时回退用其 `score`，并按"零冗余"参与，绝不崩。λ≥1 时逐位退化为按
+    `score` 的纯相关度降序（= 旧排序），λ 越小越偏向多样。
+
+    - 纯函数：不改输入列表与字典，只重排返回新列表；
+    - 平手按原始顺序取先（确定性）；
+    - `k=None` 输出全量重排，否则截断到前 k 条。
+    """
+    if not candidates:
+        return []
+    if lambda_mult >= 1.0:
+        out = sorted(candidates, key=lambda r: r.get('score', 0.0), reverse=True)
+        return out if k is None else out[:k]
+
+    def _rel(item):
+        vec = vec_map.get(item.get('chunk_id'))
+        if vec is None:
+            return item.get('score', 0.0)
+        return cosine_similarity(query_vec, vec)
+
+    pool = list(candidates)
+    target = len(pool) if k is None else min(k, len(pool))
+    selected: list[dict] = []
+    selected_vecs: list[list[float]] = []
+    remaining = list(range(len(pool)))
+
+    while len(selected) < target and remaining:
+        best_i, best_val = -1, float('-inf')
+        for i in remaining:
+            vec = vec_map.get(pool[i].get('chunk_id'))
+            redundancy = 0.0
+            if vec is not None and selected_vecs:
+                redundancy = max(cosine_similarity(vec, sv) for sv in selected_vecs)
+            val = lambda_mult * _rel(pool[i]) - (1.0 - lambda_mult) * redundancy
+            if val > best_val:
+                best_val, best_i = val, i
+        selected.append(pool[best_i])
+        v = vec_map.get(pool[best_i].get('chunk_id'))
+        if v is not None:
+            selected_vecs.append(v)
+        remaining.remove(best_i)
+    return selected
+
+
+def _time_score(date_str: str) -> float:
+    """Recency score: 7d→1.0, 30d→0.5, 90d→0.2, older→0.05.
+    """
+    if not date_str:
+        return 0.0
+    from datetime import datetime
+    try:
+        diary_date = datetime.strptime(date_str, '%Y-%m-%d')
+        days_ago = (datetime.now() - diary_date).days
+        if days_ago <= 7:
+            return 1.0
+        if days_ago <= 30:
+            return 0.5
+        if days_ago <= 90:
+            return 0.2
+        return 0.05
+    except ValueError:
+        return 0.0
+
+
+def expand_tag_candidates(conn, activated, strength_map, seen, tag_weight,
+                          time_ratio, time_score_fn, cap=TAG_CANDIDATE_CAP) -> list[dict]:
+    """**tag-first 有界候选扩增**：标签承载的内容以标签出现与否来入候选，而非词面重叠。
+
+    这是对 VCP「tag-gate / 向量重塑」思想在本地引擎的落地：一个 chunk 是否值得被
+    联想带出，取决于它携带的标签是否被查询激活（标签先行），而不是它的正文向量
+    是否碰巧与查询文字重叠——词面不可见但语义同域的内容（如「张娜升学」带出的
+    「符职大金融科技」）由此可被召回。
+
+    与旧无界 deep-assoc 的关键差异：**候选扩增有硬上界 `cap`**，只保留 by tag_strength
+    最强的前 cap 条。高频枢纽标签（考试挂了几十上百条日记）再也不可能把候选池撑爆，
+    也保证了扩增结果的确定性。返回结构与 recall_associative 既有的 extra 一致。
+
+    注意：本函数**不修改传入 seen 之外的状态**，只把入选的 chunk_id 追加到 seen
+    以去重（沿用调用方传的 seen 引用）。
+    """
+    # tag-first 门控：任何携带「激活标签」的 chunk 都先进入候选视野
+    candidates: dict[int, list[int]] = {}
+    for tid, s in activated:
+        if s <= 0:
+            continue
+        for (cid,) in conn.execute(
+                "SELECT chunk_id FROM chunk_tags WHERE tag_id = ?", (tid,)).fetchall():
+            candidates.setdefault(cid, []).append(tid)
+
+    scored = []
+    for cid, tids in candidates.items():
+        if cid in seen:                      # 已在向量 top-k 或已入选 → 不重复
+            continue
+        tag_strength = sum(strength_map.get(t, 0.0) for t in tids)
+        if tag_strength <= 0:
+            continue
+        meta = conn.execute("""
+            SELECT c.id, c.content, c.file_id,
+                   COALESCE(f.diary_date, f.created_at) AS date,
+                   f.file_path, c.importance, c.access_count
+            FROM chunks c JOIN files f ON c.file_id = f.id
+            WHERE c.id = ?
+        """, (cid,)).fetchone()
+        if not meta:
+            continue
+        scored.append((tag_strength, cid, meta))
+
+    # 有界 + 确定：按标签强度降序取前 cap，最强必保留（保证高价值不被洪泛挤掉）
+    scored.sort(key=lambda x: x[0], reverse=True)
+    extra = []
+    for tag_strength, cid, meta in scored[:cap]:
+        seen.add(cid)
+        date_str = meta['date'][:10] if meta['date'] else ''
+        ts = time_score_fn(date_str)
+        extra.append({
+            'chunk_id': meta['id'],
+            'content': meta['content'],
+            'date': date_str,
+            'file_path': meta['file_path'],
+            'score': tag_weight * tag_strength + time_ratio * ts,
+            'importance': meta['importance'] or 'medium',
+            'access_count': meta['access_count'] or 0,
+            'tag_strength': tag_strength,
+            'time_score': ts,
+        })
+    return extra
+
+
+def feedback_reward(db_path: str, chunk_ids: list[int],
+                    delta: float = 0.1, reward_cap: float = 10.0,
+                    bump: int = 1) -> dict:
+    """检索回馈强化（Iter-2 · A）：命中即反馈，帮联想"越用越准"。
+
+    - 命中 chunk 的 access_count 记一笔、last_accessed 刷新（让原本只读不写的
+      死字段活起来）。
+    - 对命中 chunk 携带标签之间**已存在的** tag_edges / tag_cooccurrence 权重
+      +Δ（受 `reward_cap` 封顶），并刷新 updated_at——配合 T3 降权形成完整闭环：
+      越用越强、越冷越沉。
+
+    铁律（非破坏）：只 UPDATE 已有边，绝不 INSERT 新边/新记录；`chunk_ids` 为空
+    或找不到标签时静默返回。调用方控制频率（复用 T4 缓存代数可去重防刷）。
+    """
+    conn = sqlite3.connect(db_path)
+    access = edges_rewarded = edges_created = 0
+    try:
+        if not chunk_ids:
+            return {'chunks_touched': 0, 'access': 0,
+                    'edges_rewarded': 0, 'edges_created': 0}
+        ph = ','.join('?' * len(chunk_ids))
+        ids = tuple(chunk_ids)
+
+        cur = conn.execute(
+            f"UPDATE chunks SET access_count = access_count + ?, "
+            f"last_accessed = datetime('now') WHERE id IN ({ph})", (bump,) + ids)
+        access = cur.rowcount
+
+        tagged = {r[0] for r in conn.execute(
+            f"SELECT DISTINCT tag_id FROM chunk_tags WHERE chunk_id IN ({ph})", ids)}
+
+        def _reward(table, c1, c2, a, b):
+            cur = conn.execute(
+                f"UPDATE {table} SET weight = MIN(weight + ?, ?), "
+                f"updated_at = datetime('now') WHERE {c1} = ? AND {c2} = ?",
+                (delta, reward_cap, a, b))
+            return cur.rowcount
+
+        for a in tagged:
+            for b in tagged - {a}:
+                edges_rewarded += _reward('tag_edges', 'tag_from_id', 'tag_to_id', a, b)
+                edges_rewarded += _reward('tag_edges', 'tag_to_id', 'tag_from_id', a, b)
+        for a in tagged:
+            for b in tagged - {a}:
+                lo, hi = (a, b) if a < b else (b, a)
+                edges_rewarded += _reward('tag_cooccurrence', 'tag1_id', 'tag2_id', lo, hi)
+
+        conn.commit()
+        return {'chunks_touched': len(ids), 'access': access,
+                'edges_rewarded': edges_rewarded, 'edges_created': edges_created}
+    finally:
+        conn.close()
 
 
 def recall_associative(query: str, db_path: str, embedding_client,
                        k: int = 10, tag_weight: float = 0.3,
                        decay: float = 0.5, max_depth: int = 2,
                        threshold: float = 0.1, time_ratio: float = 0.0,
-                       truncate: float = 1.0) -> list[dict]:
+                       truncate: float = 1.0, prefilter: bool = False,
+                       cache: bool = False, expand_neighbors: bool = False,
+                       neighbor_cap: int = 0, depth_decay: float = 1.0,
+                       multi_scale: bool = False,
+                       mmr_lambda: Optional[float] = None) -> list[dict]:
     """Associative recall: combine vector KNN results with tag pulse propagation
     and optional time weighting, truncation, and importance boosting.
+
+    `prefilter=True` 用倒排索引收窄向量扫描（加速，不改 tag-first 语义）。
+    `cache=True` 命中则直接返回上一份结果（查询+参数 + 记忆未变时）。
+    `expand_neighbors=True, neighbor_cap>0`（B）/ `depth_decay<1`（C）关闭时
+    逐位等于旧行为——由调用方显式开启以获得更强的联想半径/深跳抑制。
+    `multi_scale=True`（票2）：把 query 拆成整句+片段多粒度，各自感应标签种子后
+    取最大相似合并激活，让藏在句子角落的细线索也能成为 core 种子。默认关闭，
+    关闭时逐位等于旧行为。
     """
-    from tag_network import activate_tags
+    from tag_network import activate_tags, multi_scale_queries
+
+    if cache:
+        key = _cache_key(db_path, query=query, k=k, tag_weight=tag_weight,
+                         decay=decay, max_depth=max_depth, threshold=threshold,
+                         time_ratio=time_ratio, truncate=truncate, prefilter=prefilter,
+                         expand_neighbors=expand_neighbors, neighbor_cap=neighbor_cap,
+                         depth_decay=depth_decay, multi_scale=multi_scale,
+                         mmr_lambda=mmr_lambda)
+        hit = cache_get(db_path, key)
+        if hit is not None:
+            return hit
 
     fetch_k = max(k, int(k / max(truncate, 0.01))) if truncate < 1.0 else k
     final_k = max(1, int(k * truncate)) if truncate < 1.0 else k
-    vector_results = recall(query, db_path, embedding_client, k=fetch_k)
+    vector_results = recall(query, db_path, embedding_client, k=fetch_k,
+                            prefilter=prefilter)
     if not vector_results:
         return []
 
     query_vec = embedding_client.embed([query])[0]
+    # 票2 · 多尺度线索提取：默认关闭；开启时子粒度向量并入种子感应（取最大相似）。
+    q_vecs = None
+    if multi_scale:
+        scales = multi_scale_queries(query)
+        if len(scales) > 1:
+            q_vecs = embedding_client.embed(scales)
     activated = activate_tags(query_vec, db_path, embedding_client,
-                              decay=decay, max_depth=max_depth, threshold=threshold)
+                              decay=decay, max_depth=max_depth, threshold=threshold,
+                              expand_neighbors=expand_neighbors,
+                              neighbor_cap=neighbor_cap, depth_decay=depth_decay,
+                              query_vecs=q_vecs)
 
-    # 3. Compute time scores
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    for r in vector_results:
-        r['time_score'] = 0.0
-        if r.get('date'):
-            try:
-                diary_date = datetime.strptime(r['date'], '%Y-%m-%d')
-                days_ago = (now - diary_date).days
-                if days_ago <= 7:
-                    r['time_score'] = 1.0
-                elif days_ago <= 30:
-                    r['time_score'] = 0.5
-                elif days_ago <= 90:
-                    r['time_score'] = 0.2
-                else:
-                    r['time_score'] = 0.05
-            except ValueError:
-                pass
-
-    # 4. Combine scores
+    # 3. Combine scores
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        for r in vector_results:
+            r['time_score'] = _time_score(r.get('date'))
+
         if not activated:
             # No tag boost, just vector + time
             for r in vector_results:
                 r['score'] = r['score'] + time_ratio * r['time_score']
             vector_results.sort(key=lambda x: x['score'], reverse=True)
-            return vector_results[:final_k]
+            pool = vector_results
+        else:
+            strength_map = {tid: s for tid, s in activated}
+            seen = {r['chunk_id'] for r in vector_results}
 
-        activated_ids = [tid for tid, _ in activated]
-        strength_map = {tid: s for tid, s in activated}
+            boosted = []
+            for r in vector_results:
+                tag_rows = conn.execute("""
+                    SELECT ct.tag_id FROM chunk_tags ct
+                    WHERE ct.chunk_id = ?
+                """, (r['chunk_id'],)).fetchall()
+                tag_strength = sum(strength_map.get(t['tag_id'], 0.0) for t in tag_rows)
+                boosted.append({
+                    **r,
+                    'tag_strength': tag_strength,
+                    'score': r['score'] + tag_weight * tag_strength + time_ratio * r['time_score'],
+                })
 
-        boosted = []
-        for r in vector_results:
-            tag_rows = conn.execute("""
-                SELECT ct.tag_id FROM chunk_tags ct
-                WHERE ct.chunk_id = ?
-            """, (r['chunk_id'],)).fetchall()
-            tag_strength = sum(strength_map.get(t['tag_id'], 0.0) for t in tag_rows)
-            boosted.append({
-                **r,
-                'tag_strength': tag_strength,
-                'score': r['score'] + tag_weight * tag_strength + time_ratio * r['time_score'],
-            })
-        boosted.sort(key=lambda x: x['score'], reverse=True)
-        return boosted[:final_k]
+            # Tag-first candidate expansion: chunks that carry an activated tag but
+            # fell outside the vector top-k can still surface (e.g. 张娜升学 → 番职大,
+            # lexically disjoint from the query). `expand_tag_candidates` gates on tag
+            # presence (not text overlap) and is hard-bounded so a hub tag cannot
+            # flood the candidate pool.
+            if tag_weight > 0:
+                boosted.extend(expand_tag_candidates(
+                    conn, activated, strength_map, seen, tag_weight, time_ratio,
+                    _time_score, cap=TAG_CANDIDATE_CAP))
+
+            boosted.sort(key=lambda x: x['score'], reverse=True)
+            pool = boosted
+
+        # 票3 · MMR 多样性重排：默认关闭（mmr_lambda=None）逐位等于旧行为；
+        # 开启时在截断前重排，让互补候选挤掉近重复（信噪比优先）。
+        # λ=1 时 mmr_rerank 退化为纯相关度降序 = 旧排序，天然无损。
+        if mmr_lambda is not None and 0.0 <= mmr_lambda <= 1.0 and len(pool) > 1:
+            chunk_ids = [r['chunk_id'] for r in pool]
+            ph = ','.join('?' * len(chunk_ids))
+            vec_rows = conn.execute(
+                f"SELECT id, vector FROM chunks WHERE id IN ({ph})",
+                tuple(chunk_ids)).fetchall()
+            vec_map = {row['id']: _deserialize_vector(row['vector']) for row in vec_rows}
+            pool = mmr_rerank(pool, query_vec, vec_map, lambda_mult=mmr_lambda)
+
+        result = pool[:final_k]
     finally:
         conn.close()
 
+    if cache:
+        cache_set(db_path, key, result)
+    return result
+
 
 def main(argv=None) -> int:
-    """CLI: python recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY]"""
+    """CLI: python recall.py --query '...' [--auto] [--k N] [--agent NAME]
+    [--db PATH] [--key KEY] [--prefilter]
+    --prefilter: 用倒排索引收窄向量扫描（加速）；identity/auto 路径默认开启结果缓存。"""
     argv = argv if argv is not None else sys.argv[1:]
 
     query = None
     k = 10
     agent = os.environ.get('MIDNIGHT_AGENT')
     auto = False
+    register = None
+    budget = None
     db_path = None
     api_key = os.environ.get('SILICONFLOW_API_KEY', '')
+    prefilter = False
+    reward = False
 
     i = 0
     while i < len(argv):
@@ -232,8 +641,20 @@ def main(argv=None) -> int:
         elif arg == '--auto':
             auto = True
             i += 1
-        elif arg == '--agent' and i + 1 < len(argv):
+        elif arg == '--prefilter':
+            prefilter = True
+            i += 1
+        elif arg == '--reward':
+            reward = True
+            i += 1
+        elif arg in ('--agent', '--identity') and i + 1 < len(argv):
             agent = argv[i + 1]
+            i += 2
+        elif arg == '--register' and i + 1 < len(argv):
+            register = argv[i + 1]
+            i += 2
+        elif arg == '--budget' and i + 1 < len(argv):
+            budget = int(argv[i + 1])
             i += 2
         elif arg == '--db' and i + 1 < len(argv):
             db_path = argv[i + 1]
@@ -245,24 +666,53 @@ def main(argv=None) -> int:
             print(f"Unknown option: {arg}", file=sys.stderr)
             return 2
 
+    # --register：只开户、立身份，不召回（无需 query 也可用）
+    if register:
+        if not agent:
+            print("Usage: --register '<描述>' 需要配合 --identity <名字>", file=sys.stderr)
+            return 1
+        ensure_agent(agent, description=register)
+        print(f"[开户] 已为智能体「{agent}」建立记忆区并登记身份。")
+        return 0
+
     if not query:
-        print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY]", file=sys.stderr)
+        print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY] [--budget N]", file=sys.stderr)
         return 1
 
     config = {'api_key': api_key, 'dimension': 1024}
     client = load_embedding_client(config)
 
+    # 身份优先：上层显式声明了 --agent/--identity 就查该智能体区，--auto 不得覆盖。
+    # （身份是确定事实，auto 猜库只在身份缺失时才兜底，避免戳破记忆隔离墙。）
+    if agent:
+        # 声明身份即开户：即使该区还没写过日记，也已立身份、在 list_agents 中可见
+        ensure_agent(agent)
+        results = recall_by_identity(query, client, identity=agent, k=k,
+                                     prefilter=prefilter, cache=True)
+        results = dedupe_results(fit_to_budget(results, budget))
+        if reward and results:
+            feedback_reward(get_db_path(agent), [r['chunk_id'] for r in results])
+        output = format_recall_output(results)
+        print(output)
+        return 0
+
     if auto:
-        result = auto_recall(query, client, k=k)
+        result = auto_recall(query, client, k=k, prefilter=prefilter, cache=True)
         if result['name']:
             print(f"[自动路由] → 匹配到智能体「{result['name']}」({result['description']}, 相似度={result['score']:.3f})\n")
-        output = format_recall_output(result['results'])
+        results = dedupe_results(fit_to_budget(result['results'], budget))
+        if reward and results and result.get('name'):
+            feedback_reward(get_db_path(result['name']), [r['chunk_id'] for r in results])
+        output = format_recall_output(results)
         print(output)
         return 0
 
     db_path = db_path or get_db_path(agent)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    results = recall(query, db_path, client, k=k)
+    results = recall(query, db_path, client, k=k, prefilter=prefilter)
+    results = dedupe_results(fit_to_budget(results, budget))
+    if reward and results:
+        feedback_reward(db_path, [r['chunk_id'] for r in results])
     output = format_recall_output(results)
     print(output)
     return 0

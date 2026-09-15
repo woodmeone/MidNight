@@ -1,15 +1,31 @@
-"""Tag network — co-occurrence matrix and pulse propagation for midnight-recall.
+"""Tag network — ordered directed edges and budget-conserving pulse propagation.
 
-This is the associative memory engine: when a query activates certain tags,
-the pulse spreads along the co-occurrence network so that *associated* content
-surfaces without the user mentioning the exact keyword.
+This is the associative memory engine (V2, aligned with VCP TagMemo V9.1):
+when a query activates certain tags, the pulse spreads along *directed*,
+*log-compressed*, *hub-corrected* edges so that associated content surfaces
+without the user mentioning the exact keyword — and without high-frequency
+hub words (e.g. "考试") monopolising the spread.
 
-Algorithm (simplified from the associative-memory design, original implementation):
-- Activate tags whose vector/similarity matches the query.
-- BFS spread: each hop decays pulse strength by `decay`.
-- Any tag receiving strength >= `threshold` joins the activated set.
-- Return activated tags with their cumulative strength.
+Design (locked in docs/OPTIMIZATION-SPEC.md §A):
+1. Ordered bidirectional edges: tags in the same file get directed edges
+   (顺流 forward = earlier→later, 逆流 reverse = later→earlier). Weight is
+   accumulated raw evidence W (see ingest.py), contribution =
+   order potential · exp(-position distance / λ) · direction damping.
+2. Cumulative evidence compression: effective edge weight e = log(1 + λ·W).
+   Keeps high-frequency tags from dominating linearly.
+3. In-flow hub correction: the gain of an edge *into* a node is power-law
+   scaled down by that node's total in-flow — generic hub words are suppressed.
+4. Budget-conserving propagation: each node's total out-flow is capped at
+   strength·decay, split among neighbours by effective edge share. Pulse
+   energy only decays per hop, never multiplies without bound.
+5. Core/Ghost tag pre-sensing: the query is embedded and compared against
+   *all* tags (not one seed); top candidates become Core tags (full strength),
+   a few weak-but-positive ones become Ghost tags (small strength) so deep
+   associations can join if reinforced.
+
+The `recall_associative` interface in recall.py is unchanged.
 """
+import math
 import os
 import sys
 import sqlite3
@@ -19,55 +35,218 @@ sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from config 可用
 sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
 from scripts.config import get_db_path  # noqa: E402
 
+# --- VCP TagMemo association constants ---
+DISTANCE_LAMBDA = 3.0        # position-distance decay length in a file's tag list
+FORWARD_DAMP = 1.0           # 顺流 direction damping
+REVERSE_DAMP = 0.4           # 逆流 direction damping
+MAX_REVERSE_RATIO = 0.6      # guard: reverse/forward damping ratio ceiling
+LOG_LAMBDA = 1.0             # cumulative evidence log compression: e = log(1 + λ·W)
+HUB_K = 0.05                 # hub correction gain
+HUB_POWER = 1.0              # hub correction power-law exponent
+GHOST_STRENGTH = 0.3         # ghost tag pre-sensed activation
+GHOST_BUDGET = 5             # how many ghost candidates to pre-sense
+CORE_RATIO = 0.25            # core seed must be ≥ this fraction of best-match similarity
+GHOST_RATIO = 0.05           # ghost candidate must be ≥ this fraction of best-match similarity
+
+# --- 多尺度线索提取（残差金字塔落地，票2）---
+MULTI_SCALE_MAX = 8          # 粒度总数硬上界（含整句），防粒度爆量
+MULTI_SCALE_MIN_LEN = 2      # 短于此的片段丢弃（单字无区分度）
+_SPLIT_PUNCT = '，。、；：！？…—～·,.;:!?|"（）()《》【】'
+
+
+def multi_scale_queries(text: str, max_scales: int = MULTI_SCALE_MAX) -> list[str]:
+    """把查询拆成多个语义粒度：整句在前，其后是标点/空白切分的片段。
+
+    动机：整句 embedding 会被主话题主导，藏在句子角落的细线索（如长句里的
+    「番职大」）只剩弱相似，单尺度感应只能给它 ghost 强度。拆出子粒度后各自
+    去感应标签，细线索有机会以 core 满强度成为召回种子。
+
+    纯函数、确定性：整句永远排第一；片段按原文出现序；去重；总数硬上界。
+    """
+    text = (text or '').strip()
+    if not text:
+        return []
+    scales = [text]
+    buf = []
+    for ch in text:
+        if ch.isspace() or ch in _SPLIT_PUNCT:
+            seg = ''.join(buf)
+            if len(seg) >= MULTI_SCALE_MIN_LEN and seg != text:
+                scales.append(seg)
+            buf = []
+        else:
+            buf.append(ch)
+    tail = ''.join(buf)
+    if len(tail) >= MULTI_SCALE_MIN_LEN and tail != text:
+        scales.append(tail)
+    seen = set()
+    out = []
+    for s in scales:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:max_scales]
+
+
+def _edge_contribution(pos_a: int, pos_b: int) -> float:
+    """Per-file forward edge contribution: order potential × distance decay.
+
+    Tags listed earlier in a file's frontmatter are treated as more salient
+    (order potential = 1/(1 + min position)); far-apart tags decay with the
+    position distance. This is the geometric part of the weight; the caller
+    multiplies in direction damping.
+    """
+    distance = abs(pos_a - pos_b)
+    if distance == 0:
+        return 0.0
+    potential = 1.0 / (1 + min(pos_a, pos_b))
+    return potential * math.exp(-distance / DISTANCE_LAMBDA)
+
+
+def _compressed_weight(raw: float) -> float:
+    """Cumulative evidence compression: e = log(1 + λ·W)."""
+    return math.log1p(LOG_LAMBDA * max(raw, 0.0))
+
+
+def _hub_scale(hub_inflow: float) -> float:
+    """In-flow hub correction: power-law shrink of edge gain into a hub node."""
+    return (1.0 + HUB_K * (hub_inflow ** HUB_POWER)) ** -1.0
+
 
 def activate_tags(query_vec, db_path: str, embedding_client,
                   decay: float = 0.5, max_depth: int = 2, threshold: float = 0.1,
-                  initial_hits: int = 5) -> list[tuple[int, float]]:
-    """Pulse-propagate activation from seed tags to their co-occurrence neighbours.
+                  initial_hits: int = 5, expand_neighbors: bool = False,
+                  neighbor_cap: int = 0, depth_decay: float = 1.0,
+                  query_vecs: list = None) -> list[tuple[int, float]]:
+    """Pulse-propagate activation from pre-sensed seed tags along directed edges.
 
-    Returns list of (tag_id, cumulative_strength) sorted desc, including seed tags.
+    新增（Iter-2，皆默认关闭，开启才改变行为）：
+    - `expand_neighbors=True, neighbor_cap>0`（B）：用**已激活核心标签的向量**再扫一遍
+      tag 池，把"词面不同但向量相近"的旁支标签以 ghost 强度 soft 激活加入传播，扩大
+      联想半径（如「升学」靠向量带出「3+证书/志愿」这类无直接边的标签）。默认关，避免
+      向量相近就乱带入。
+    - `depth_decay<1`（C）：每次跳跃在前一跳基础上再乘 depth_decay，使二跳及以上
+      额外衰减，压住"两跳漫游到无关枢纽"；`1.0` 时逐位等于旧行为。
+    - `query_vecs=[...]`（票2 · 多尺度线索提取）：传入多条查询向量（整句 + 子粒度
+      片段）时，标签预感知取**各向量对同一标签的最大相似度**——藏在句子角落的细
+      线索只要任一粒度向量贴近某标签，该标签即可升为 core 满强度种子。默认 None =
+      仅用 query_vec 单尺度，行为逐位等于旧实现。
+
+    Returns list of (tag_id, cumulative_strength) sorted desc, including
+    core/ghost seeds and every tag reached above `threshold`.
     """
     conn = sqlite3.connect(db_path)
     try:
-        # 1. Find seed tags: tags whose vector is most similar to query
+        # 1. Pre-sense Core + Ghost tags by embedding similarity (not one seed).
         rows = conn.execute("SELECT id, name, vector FROM tags WHERE vector IS NOT NULL").fetchall()
         if not rows:
             return []
 
+        # 多尺度：每个标签取各查询向量的最大相似度；None/单元素时逐位等于旧行为。
+        vecs = [query_vec] if not query_vecs else list(query_vecs)
         seed_scores = []
         for row in rows:
-            vec = _deserialize(row['vector']) if isinstance(row, sqlite3.Row) else _deserialize(row[2])
-            score = _cosine(query_vec, vec) if vec else 0.0
-            seed_scores.append((row['id'] if isinstance(row, sqlite3.Row) else row[0], score))
+            vec = _deserialize(row[2])
+            if not vec:
+                seed_scores.append((row[0], 0.0))
+                continue
+            score = max((_cosine(qv, vec) for qv in vecs), default=0.0)
+            seed_scores.append((row[0], score))
         seed_scores.sort(key=lambda x: x[1], reverse=True)
-        seed_tags = [tid for tid, s in seed_scores[:initial_hits] if s > 0]
-
-        if not seed_tags:
+        top_score = seed_scores[0][1] if seed_scores else 0.0
+        if top_score <= 0:
             return []
 
-        # 2. BFS pulse propagation
-        strength = {tid: 1.0 for tid in seed_tags}
-        current_frontier = list(seed_tags)
-        for depth in range(1, max_depth + 1):
-            next_frontier = []
-            for tid in current_frontier:
-                edges = conn.execute(
-                    "SELECT tag1_id, tag2_id, weight FROM tag_cooccurrence WHERE tag1_id = ? OR tag2_id = ?",
-                    (tid, tid)
-                ).fetchall()
-                for e in edges:
-                    t1, t2, w = e[0], e[1], e[2] if not isinstance(e, sqlite3.Row) else (e['tag1_id'], e['tag2_id'], e['weight'])
-                    neighbor = t2 if t1 == tid else t1
-                    pulsed = strength.get(tid, 0.0) * decay * min(w, 5.0) / 5.0
-                    if neighbor not in strength or pulsed > strength[neighbor]:
-                        strength[neighbor] = pulsed
-                        next_frontier.append(neighbor)
-            # prune below threshold
-            current_frontier = [t for t in set(next_frontier) if strength.get(t, 0.0) >= threshold]
-            if not current_frontier:
+        # Core = meaningfully similar tags (relative to best match), not just >0,
+        # so embedding-hash collision noise can't become full-strength seeds.
+        core_floor = top_score * CORE_RATIO
+        ghost_floor = top_score * GHOST_RATIO
+        core = [tid for tid, s in seed_scores if s >= core_floor][:initial_hits]
+        ghosts = [
+            tid for tid, s in seed_scores
+            if ghost_floor <= s < core_floor
+        ][:GHOST_BUDGET]
+
+        if not core:
+            return []
+
+        # B · 邻居（soft）预感知：默认关闭；开启时用**激活种子（core+ghost）的向量**
+        #     把"与某已激活标签向量相近、但本身既不贴近 query、也无直达边"的旁支
+        #     标签以 ghost 强度拉进传播，扩大联想半径。对 bag-of-chars 嵌入，它与
+        #     ghost 预感知部分重叠；但对 BGE 等语义嵌入，能补"词面不同、语义近"。
+        neighbor_gids: list[int] = []
+        if expand_neighbors and neighbor_cap > 0:
+            seed_ids = list(core) + list(ghosts)
+            seed_set = set(seed_ids)
+            seed_vec = {r[0]: _deserialize(r[2]) for r in rows
+                        if r[0] in seed_set and r[2]}
+            agg: dict[int, bool] = {}
+            for tid, v in seed_vec.items():
+                cand = []
+                for rid, _rname, rvec in rows:
+                    if rid in seed_set or rid == tid or not rvec:
+                        continue
+                    s = _cosine(v, _deserialize(rvec))
+                    if s >= ghost_floor:
+                        cand.append((rid, s))
+                cand.sort(key=lambda x: x[1], reverse=True)
+                for rid, _s in cand[:neighbor_cap]:
+                    agg[rid] = True
+            neighbor_gids = list(agg)
+
+        # 2. Pre-compute hub in-flow (raw evidence) for hub correction.
+        hub_inflow: dict[int, float] = {}
+        for from_id, to_id, w in conn.execute(
+            "SELECT tag_from_id, tag_to_id, weight FROM tag_edges"
+        ).fetchall():
+            hub_inflow[to_id] = hub_inflow.get(to_id, 0.0) + w
+
+        def _out_edges(tid: int) -> list[tuple[int, float]]:
+            """Effective outgoing edges: log-compressed and hub-corrected."""
+            out = []
+            for to_id, w in conn.execute(
+                "SELECT tag_to_id, weight FROM tag_edges WHERE tag_from_id = ?",
+                (tid,)
+            ).fetchall():
+                if to_id == tid:
+                    continue
+                eff = _compressed_weight(w) * _hub_scale(hub_inflow.get(to_id, 0.0))
+                if eff > 0:
+                    out.append((to_id, eff))
+            return out
+
+        # 3. Budget-conserving pulse propagation.
+        strength: dict[int, float] = {}
+        for tid in core:
+            strength[tid] = strength.get(tid, 0.0) + 1.0
+        for tid in ghosts:
+            strength[tid] = strength.get(tid, 0.0) + GHOST_STRENGTH
+        for tid in neighbor_gids:
+            strength[tid] = strength.get(tid, 0.0) + GHOST_STRENGTH
+        frontier = [(tid, strength[tid]) for tid in core + ghosts + neighbor_gids]
+
+        for _depth in range(1, max_depth + 1):
+            received: dict[int, float] = {}
+            hop_factor = decay * (depth_decay ** (_depth - 1))  # C · 深跳额外衰减
+            for tid, s in frontier:
+                edges = _out_edges(tid)
+                total_w = sum(w for _, w in edges)
+                if total_w <= 0 or s <= 0:
+                    continue
+                budget = s * hop_factor  # fixed outflow budget: no unbounded fan-out
+                for to_id, eff in edges:
+                    pulse = budget * eff / total_w
+                    if pulse > 0:
+                        received[to_id] = received.get(to_id, 0.0) + pulse
+            frontier = []
+            for to_id, pulse in received.items():
+                strength[to_id] = strength.get(to_id, 0.0) + pulse
+                if strength[to_id] >= threshold:
+                    frontier.append((to_id, strength[to_id]))
+            if not frontier:
                 break
 
-        # 3. Filter threshold, sort by strength
+        # 4. Filter threshold, sort by strength.
         result = [(tid, s) for tid, s in strength.items() if s >= threshold and s > 0]
         result.sort(key=lambda x: x[1], reverse=True)
         return result
