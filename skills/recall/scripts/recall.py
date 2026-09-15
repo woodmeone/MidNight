@@ -306,6 +306,57 @@ def fit_to_budget(results: list[dict], budget_chars: int = None) -> list[dict]:
     return fitted
 
 
+def mmr_rerank(candidates: list[dict], query_vec: list[float],
+               vec_map: dict, lambda_mult: float = 0.5,
+               k: Optional[int] = None) -> list[dict]:
+    """MMR（最大边际相关性）多样性重排——Ω 门控"信噪比"思想的落地。
+
+    贪心选择：每步取 `λ·rel(c) − (1−λ)·max_sim(c, 已选)` 最大的候选。
+    相关度 rel = cos(query_vec, 候选向量)（纯语义相关，不带标签/时间加成——
+    加成是召回阶段的联想信号，重排阶段只比"讲了多少不同的事"）；候选缺向量
+    时回退用其 `score`，并按"零冗余"参与，绝不崩。λ≥1 时逐位退化为按
+    `score` 的纯相关度降序（= 旧排序），λ 越小越偏向多样。
+
+    - 纯函数：不改输入列表与字典，只重排返回新列表；
+    - 平手按原始顺序取先（确定性）；
+    - `k=None` 输出全量重排，否则截断到前 k 条。
+    """
+    if not candidates:
+        return []
+    if lambda_mult >= 1.0:
+        out = sorted(candidates, key=lambda r: r.get('score', 0.0), reverse=True)
+        return out if k is None else out[:k]
+
+    def _rel(item):
+        vec = vec_map.get(item.get('chunk_id'))
+        if vec is None:
+            return item.get('score', 0.0)
+        return cosine_similarity(query_vec, vec)
+
+    pool = list(candidates)
+    target = len(pool) if k is None else min(k, len(pool))
+    selected: list[dict] = []
+    selected_vecs: list[list[float]] = []
+    remaining = list(range(len(pool)))
+
+    while len(selected) < target and remaining:
+        best_i, best_val = -1, float('-inf')
+        for i in remaining:
+            vec = vec_map.get(pool[i].get('chunk_id'))
+            redundancy = 0.0
+            if vec is not None and selected_vecs:
+                redundancy = max(cosine_similarity(vec, sv) for sv in selected_vecs)
+            val = lambda_mult * _rel(pool[i]) - (1.0 - lambda_mult) * redundancy
+            if val > best_val:
+                best_val, best_i = val, i
+        selected.append(pool[best_i])
+        v = vec_map.get(pool[best_i].get('chunk_id'))
+        if v is not None:
+            selected_vecs.append(v)
+        remaining.remove(best_i)
+    return selected
+
+
 def _time_score(date_str: str) -> float:
     """Recency score: 7d→1.0, 30d→0.5, 90d→0.2, older→0.05.
     """
@@ -451,7 +502,8 @@ def recall_associative(query: str, db_path: str, embedding_client,
                        truncate: float = 1.0, prefilter: bool = False,
                        cache: bool = False, expand_neighbors: bool = False,
                        neighbor_cap: int = 0, depth_decay: float = 1.0,
-                       multi_scale: bool = False) -> list[dict]:
+                       multi_scale: bool = False,
+                       mmr_lambda: Optional[float] = None) -> list[dict]:
     """Associative recall: combine vector KNN results with tag pulse propagation
     and optional time weighting, truncation, and importance boosting.
 
@@ -470,7 +522,8 @@ def recall_associative(query: str, db_path: str, embedding_client,
                          decay=decay, max_depth=max_depth, threshold=threshold,
                          time_ratio=time_ratio, truncate=truncate, prefilter=prefilter,
                          expand_neighbors=expand_neighbors, neighbor_cap=neighbor_cap,
-                         depth_decay=depth_decay, multi_scale=multi_scale)
+                         depth_decay=depth_decay, multi_scale=multi_scale,
+                         mmr_lambda=mmr_lambda)
         hit = cache_get(db_path, key)
         if hit is not None:
             return hit
@@ -507,7 +560,7 @@ def recall_associative(query: str, db_path: str, embedding_client,
             for r in vector_results:
                 r['score'] = r['score'] + time_ratio * r['time_score']
             vector_results.sort(key=lambda x: x['score'], reverse=True)
-            result = vector_results[:final_k]
+            pool = vector_results
         else:
             strength_map = {tid: s for tid, s in activated}
             seen = {r['chunk_id'] for r in vector_results}
@@ -536,7 +589,21 @@ def recall_associative(query: str, db_path: str, embedding_client,
                     _time_score, cap=TAG_CANDIDATE_CAP))
 
             boosted.sort(key=lambda x: x['score'], reverse=True)
-            result = boosted[:final_k]
+            pool = boosted
+
+        # 票3 · MMR 多样性重排：默认关闭（mmr_lambda=None）逐位等于旧行为；
+        # 开启时在截断前重排，让互补候选挤掉近重复（信噪比优先）。
+        # λ=1 时 mmr_rerank 退化为纯相关度降序 = 旧排序，天然无损。
+        if mmr_lambda is not None and 0.0 <= mmr_lambda <= 1.0 and len(pool) > 1:
+            chunk_ids = [r['chunk_id'] for r in pool]
+            ph = ','.join('?' * len(chunk_ids))
+            vec_rows = conn.execute(
+                f"SELECT id, vector FROM chunks WHERE id IN ({ph})",
+                tuple(chunk_ids)).fetchall()
+            vec_map = {row['id']: _deserialize_vector(row['vector']) for row in vec_rows}
+            pool = mmr_rerank(pool, query_vec, vec_map, lambda_mult=mmr_lambda)
+
+        result = pool[:final_k]
     finally:
         conn.close()
 
