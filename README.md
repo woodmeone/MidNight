@@ -37,6 +37,9 @@ cd skills/recall && python demo.py
 ## 使用
 
 ```bash
+# 回复前记忆准备（推荐：门控+召回+去重+预算一条命令）
+python prep.py --message "用户原话" --identity qinglan --budget 2000
+
 # 写日记入库（Nova 智能体）
 python ingest.py --agent Nova
 

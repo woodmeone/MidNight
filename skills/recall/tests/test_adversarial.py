@@ -375,15 +375,17 @@ def test_serialize_deserialize_roundtrip():
         assert a == pytest.approx(b)
 
 
-def test_embedding_factory_no_config():
+def test_embedding_factory_no_config(monkeypatch):
     """无配置时返回假 embedding"""
+    monkeypatch.delenv('MIDNIGHT_EMBEDDING', raising=False)
     client = load_embedding_client({})
     from scripts.embedding import FakeEmbeddingClient
     assert isinstance(client, FakeEmbeddingClient)
 
 
-def test_embedding_factory_with_key():
+def test_embedding_factory_with_key(monkeypatch):
     """有 API key 时返回真实 client"""
+    monkeypatch.delenv('MIDNIGHT_EMBEDDING', raising=False)
     client = load_embedding_client({'api_key': 'sk-test', 'api_url': 'https://test.api'})
     from scripts.embedding import SiliconFlowEmbeddingClient
     assert isinstance(client, SiliconFlowEmbeddingClient)
