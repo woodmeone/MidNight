@@ -18,6 +18,17 @@ _GENERATION_KEY = 'cache_generation'
 CACHE_TTL_SECONDS = 300
 
 
+def _ensure_schema(db_path: str) -> None:
+    """确保 schema 存在（T4 前的旧库缺 meta/recall_cache 表）。
+
+    init_db 幂等（CREATE TABLE IF NOT EXISTS），对旧库只补表、不动数据。
+    open+close 立即释放句柄，避免 Windows 锁文件。
+    """
+    from scripts.schema import init_db
+    conn = init_db(db_path)
+    conn.close()
+
+
 def get_generation(conn: sqlite3.Connection) -> int:
     """当前缓存代数（0 表示从未 ingest）。"""
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (_GENERATION_KEY,)).fetchone()
@@ -45,6 +56,7 @@ def cache_get(db_path: str, key: str, ttl_seconds: int = CACHE_TTL_SECONDS):
     """命中且代数一致且未超窗 → 返回反序列化列表；否则 None。"""
     if not os.path.exists(db_path):
         return None
+    _ensure_schema(db_path)
     conn = sqlite3.connect(db_path)
     try:
         current = get_generation(conn)
@@ -71,6 +83,7 @@ def cache_get(db_path: str, key: str, ttl_seconds: int = CACHE_TTL_SECONDS):
 def cache_set(db_path: str, key: str, results: list) -> None:
     """写入本代缓存。失败静默（缓存是优化，绝不让缓存错误影响召回）。"""
     try:
+        _ensure_schema(db_path)
         conn = sqlite3.connect(db_path)
         try:
             gen = get_generation(conn)

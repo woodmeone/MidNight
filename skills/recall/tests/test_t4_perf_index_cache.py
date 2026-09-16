@@ -13,7 +13,7 @@ from scripts.schema import init_db
 from scripts.embedding import SemanticFakeEmbeddingClient
 from scripts.ingest import ingest_file
 from scripts.recall import recall_associative, vector_candidate_ids
-from scripts.cache import get_generation
+from scripts.cache import get_generation, cache_get, cache_set
 
 
 class _CountingEmbed(SemanticFakeEmbeddingClient):
@@ -192,3 +192,89 @@ def test_cache_respects_query_variance():
         recall_associative("熊可婷", db, counter, k=5, tag_weight=0.3,
                            time_ratio=0.2, cache=True)
         assert counter.calls > calls_after_a
+
+
+# T4 前的旧库（真实 qinglan/mira 迁移前表集合）——复刻升级前的历史 DB 形态。
+_OLD_SCHEMA_SQL = """
+CREATE TABLE files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_path TEXT UNIQUE NOT NULL,
+    diary_name TEXT NOT NULL DEFAULT 'default',
+    checksum TEXT NOT NULL,
+    diary_date TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL REFERENCES files(id),
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    vector BLOB,
+    importance TEXT DEFAULT 'medium',
+    access_count INTEGER DEFAULT 0,
+    last_accessed TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(file_id, chunk_index)
+);
+CREATE TABLE tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    vector BLOB,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE chunk_tags (
+    chunk_id INTEGER NOT NULL REFERENCES chunks(id),
+    tag_id INTEGER NOT NULL REFERENCES tags(id),
+    position INTEGER DEFAULT 0,
+    PRIMARY KEY (chunk_id, tag_id)
+);
+CREATE TABLE tag_cooccurrence (
+    tag1_id INTEGER NOT NULL REFERENCES tags(id),
+    tag2_id INTEGER NOT NULL REFERENCES tags(id),
+    weight REAL NOT NULL DEFAULT 1.0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (tag1_id, tag2_id),
+    CHECK (tag1_id < tag2_id)
+);
+CREATE TABLE tag_edges (
+    tag_from_id INTEGER NOT NULL REFERENCES tags(id),
+    tag_to_id INTEGER NOT NULL REFERENCES tags(id),
+    weight REAL NOT NULL DEFAULT 0.0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (tag_from_id, tag_to_id)
+);
+"""
+
+
+def test_cache_self_heals_on_pre_t4_db():
+    """旧库缺 meta/recall_cache：cache 读写先确保 schema，不崩且自动补表。
+
+    复现真实升级场景：qinglan/mira 等 T4 前创建的库没有 meta 表，
+    cache_get 原实现直接 SELECT meta → sqlite3.OperationalError。
+    """
+    import sqlite3
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        db = os.path.join(tmpdir, 'recall.db')
+        conn = sqlite3.connect(db)
+        conn.executescript(_OLD_SCHEMA_SQL)
+        conn.commit()
+        conn.close()
+
+        key = 'pre_t4_key'
+        assert cache_get(db, key) is None, "旧库上 cache_get 不应崩溃，未命中返回 None"
+        cache_set(db, key, [{'chunk_id': 1, 'content': 'x'}])
+
+        conn = sqlite3.connect(db)
+        try:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert 'meta' in tables and 'recall_cache' in tables, \
+                "cache 读写后应补齐 meta/recall_cache"
+            row = conn.execute(
+                "SELECT result FROM recall_cache WHERE key=?", (key,)).fetchone()
+            assert row and 'chunk_id' in row[0], "补表后 cache_set 应真实落盘"
+            # 落盘内容可再次读回（同库缓存闭环）
+            assert cache_get(db, key) is not None
+        finally:
+            conn.close()
