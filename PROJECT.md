@@ -11,7 +11,7 @@
 
 | 模块 | 代码区域 | 核心入口 | 职责 |
 |---|---|---|---|
-| `midnight-recall` | `skills/recall/scripts/` | `prep.py`（回复前记忆准备，**推荐入口**）、`recall.py`（联想召回）、`ingest.py`（日记入库） | 自动写日记 + 联想式召回 + 自我模型 |
+| `midnight-recall` | `skills/recall/scripts/` | `prep.py`（回复前记忆准备，**推荐入口**）、`recall.py`（联想召回）、`ingest.py`（日记入库）、`harvest.py`（拉取式沉淀，补充渠道） | 自动写日记 + 联想式召回 + 自我模型 + 拉取式沉淀 |
 | `midnight-core` | `skills/core/scripts/` | `append.py`（追加事实）、`timeline.py`（合并时间线） | 跨端/跨会话统一事实时间线 |
 | `midnight-pulse` | `skills/pulse/scripts/` | `pulse.py`（心跳循环） | AI 自主定闹钟，干完活自己醒来继续 |
 | `midnight-compass` | `skills/compass/scripts/` | `route.py`（语义路由） | 按问题难度自动选模型 + 容灾切换 |

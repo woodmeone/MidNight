@@ -179,10 +179,13 @@ def ingest_file(file_path: str, db_path: str, embedding_client, conn: Optional[s
                 [(cid, gram) for gram in content_ngrams(chunk_text)])
 
         # Insert tags (upsert) and link to all chunks of this file
+        # 去重保序：重复标签会让共现矩阵出现 t1==t2，触发 CHECK(tag1_id<tag2_id) 崩库
+        seen_tag_names = set()
         tag_ids = []
         for tag_name in parsed['tags']:
-            if not tag_name:
+            if not tag_name or tag_name in seen_tag_names:
                 continue
+            seen_tag_names.add(tag_name)
             # Upsert tag
             existing = conn.execute("SELECT id FROM tags WHERE name = ?", (tag_name,)).fetchone()
             if existing:
