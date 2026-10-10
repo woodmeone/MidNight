@@ -119,6 +119,23 @@ python prep.py --message "..." --identity qinglan --multi-scale --mmr 0.5
 
 `prep.py` 被门控挡下（纯寒暄/短消息且无触发词）时不打印任何内容——据此跳过注入即可。
 
+## 拉取式沉淀（harvest）
+
+**手写日记是主动渠道，本渠道只做补充。** AI Coding 工具（如 Trae）会把会话摘要自动落盘到磁盘，但不会主动喂给 recall（无生命周期 hook）。`harvest.py` 定时/手动扫盘，把这些摘要的**精华**（intent/outcome/learned）转换成遵守日记协议的 `.md` 并入库，让联想召回能命中"手写没记、但工具记了"的基础设施决策与踩坑。
+
+```bash
+# 干跑：只预览生成的日记样例，不写任何盘
+python harvest.py --agent qinglan --project TeacherPipeLine --dry-run
+
+# 增量导入：水位线去重，重跑只补新增
+python harvest.py --agent qinglan --project TeacherPipeLine
+```
+
+- **作用域控制**：`--project <子串>` 只取匹配项目的摘要，避免跨域（如自媒体/爬虫）记忆污染本智能体的标签共现网。
+- **拉取式 vs 推送式**：工具不留 hook 就拉它的落盘文件；对方无需配合。新增工具只写一个薄适配器（回答"文件在哪、怎么解析"），转换内核不动。
+- **权重让位手写**：拉取日记 `importance: low`，召回天然排在手写（medium/high）之后，只在手写未覆盖时补位。
+- **幂等三重保险**：确定性文件名 + `message_id` 水位线（`<agent>/harvest_state.json`）+ ingest 的 checksum。
+
 底层仍可直接用 `recall.py` 做联想召回：
 
 ```bash
@@ -237,6 +254,7 @@ skills/recall/
 │   ├── self_model.py     # self 锚生成/读取/演化（定海锚 + 可动层）
 │   ├── evolution.py      # 自进化（可动层覆写 + 演化日志 + 久不用衰减）
 │   ├── session_start.py  # 首轮上下文轻编译（身份摘要 ≤200 字）
+│   ├── harvest.py        # 拉取式沉淀（AI 工具落盘摘要 → 日记，补充渠道）
 │   ├── maintenance.py    # 根级孤儿数据检测/迁移（--scan / --migrate）
 │   ├── embedding.py      # embedding 客户端（可注入 fake）
 │   └── schema.py         # SQLite schema
