@@ -18,3 +18,18 @@
 ## 环境备注
 
 跑全量测试期间 C 盘一度被 `tempfile` 泄漏的临时库塞满（`database or disk is full`），不是代码问题；已清理 500+ 个临时库目录。既有测试的 `TemporaryDirectory(ignore_cleanup_errors=True)` 在 Windows 上会漏掉 `recall.db`，属既有行为，本轮未改（范围外，但值得单开一票）。
+
+## 第二条实证：库比 md 更完整
+
+qinglan 区实测：库内 508 条 file 记录 vs 磁盘 505 个 `.md`，其中 **2 条记录的源 md 已被删除**，`--timeline` 仍能返回它们的内容。
+
+这条比第一条更能说明问题：**md 不是可靠的真值来源**——它是"写入当时"的源，不保证长期存在。检索若依赖 md，就会随文件丢失而丢记忆；检索走库，删了 md 也照样答得出。
+
+## 对抗探针结果（`tests/probe_adversarial.py`，全部通过）
+
+- LIKE 注入面：`a' OR 1=1 --`、`%' OR '1'='1`、`%`、`_`、`\`、`'`、`it's` 全部按字面处理
+- 日期边界：`since==until`、极早/极晚、空串
+- 规模：k=10^6、k=0、k 负数
+- 库异常：库不存在（自动建空库）、坏库文件（报"记忆库不可用"）、孤儿 chunk（file 行缺失）
+- 超长字面：不再触发 `LIKE or GLOB pattern too complex` 崩溃，改为明确报错
+
