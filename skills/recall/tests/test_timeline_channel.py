@@ -129,6 +129,42 @@ def test_literal_empty_when_no_match(base):
     assert literal_recall(db, '完全不存在的词', k=10) == []
 
 
+def test_literal_escapes_underscore_wildcard(base):
+    """`_` 是 LIKE 的单字符通配符：不转义的话，查一个下划线会命中所有日记。"""
+    db = _seed('probe')
+    assert literal_recall(db, '_', k=10) == []
+
+
+def test_timeline_zero_returns_empty(base):
+    db = _seed('probe')
+    assert timeline_recall(db, k=0) == []
+
+
+def test_since_without_channel_is_rejected(base, capsys):
+    rc = recall_main(['--since', '2026-09-01', '--identity', 'probe'])
+    assert rc == 2
+    assert '--timeline' in capsys.readouterr().err
+
+
+def test_until_includes_whole_day_when_date_has_time_part(base):
+    """旧库/手工改写的行可能是全时间戳，--until 必须仍能包住当天。
+
+    对抗场景：`'2026-09-22 10:00:00' > '2026-09-22'` 为真——不把日期截到 10 位
+    就会把当天的记忆误排除（边界最容易被"看起来对"的字符串比较坑到）。
+    """
+    import sqlite3
+    db = _seed('probe')
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("UPDATE files SET diary_date = '2026-09-22 10:00:00' "
+                     "WHERE diary_date = '2026-09-22'")
+        conn.commit()
+    finally:
+        conn.close()
+    got = timeline_recall(db, k=10, until='2026-09-22')
+    assert [r['date'] for r in got] == ['2026-09-22', '2026-09-17', '2026-09-10', '2026-09-01']
+
+
 def test_literal_ascii_case_insensitive(base):
     db = _seed('probe')
     got = literal_recall(db, 'python', k=10)

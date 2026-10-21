@@ -1,4 +1,4 @@
-"""Recall — vector similarity search for midnight-recall memory store.
+﻿"""Recall — vector similarity search for midnight-recall memory store.
 
 CLI: python recall.py --query "..." [--k 10] [--db PATH] [--key KEY]
 """
@@ -330,8 +330,14 @@ def _escape_like(text: str) -> str:
 
 
 def _date_clause(alias: str, since: Optional[str], until: Optional[str]):
-    """日期闭区间 SQL 片段（对 diary_date 优先、缺失时回退 created_at）。"""
-    expr = f"COALESCE({alias}.diary_date, {alias}.created_at)"
+    """日期闭区间 SQL 片段。
+
+    对 `diary_date` 优先、缺失时回退 `created_at`；**两者都截到 10 位**再比较。
+    为什么必须截断：旧库里 `diary_date` 可能为 NULL，回退到 `created_at` 时是
+    `YYYY-MM-DD HH:MM:SS` 全时间戳，而 `--until 2026-09-22` 是日期串——
+    直接比较会因 `'2026-09-22 10:00:00' > '2026-09-22'` 把当天的记忆误排除。
+    """
+    expr = f"substr(COALESCE({alias}.diary_date, {alias}.created_at), 1, 10)"
     sql, params = '', []
     if since:
         sql += f" AND {expr} >= ?"
@@ -342,7 +348,7 @@ def _date_clause(alias: str, since: Optional[str], until: Optional[str]):
     return sql, params
 
 
-def _open_readonly_ready(db_path: str) -> sqlite3.Connection:
+def _open_ready(db_path: str) -> sqlite3.Connection:
     """打开库并把 schema 补齐（旧库可能缺表），返回带 row_factory 的连接。"""
     from scripts.schema import init_db
     init_db(db_path).close()
@@ -362,11 +368,12 @@ def timeline_recall(db_path: str, k: int = 5, since: str = None,
     """
     if not k or k <= 0:
         return []
-    conn = _open_readonly_ready(db_path)
+    conn = _open_ready(db_path)
     try:
         clause, params = _date_clause('f', since, until)
         files = conn.execute(
-            "SELECT f.id, COALESCE(f.diary_date, f.created_at) AS date, f.file_path "
+            "SELECT f.id, substr(COALESCE(f.diary_date, f.created_at), 1, 10) AS date, "
+            "f.file_path "
             "FROM files f "
             "WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id) "
             + clause +
@@ -403,12 +410,12 @@ def literal_recall(db_path: str, text: str, k: int = 10, since: str = None,
     if not text or not k or k <= 0:
         return []
     pattern = '%' + _escape_like(text) + '%'
-    conn = _open_readonly_ready(db_path)
+    conn = _open_ready(db_path)
     try:
         clause, params = _date_clause('f', since, until)
         rows = conn.execute(
             "SELECT c.id, c.file_id, c.chunk_index, c.content, c.importance, "
-            "COALESCE(f.diary_date, f.created_at) AS date, f.file_path "
+            "substr(COALESCE(f.diary_date, f.created_at), 1, 10) AS date, f.file_path "
             "FROM chunks c JOIN files f ON c.file_id = f.id "
             "WHERE lower(c.content) LIKE lower(?) ESCAPE '\\' " + clause +
             " ORDER BY date DESC, c.file_id DESC, c.chunk_index ASC",
