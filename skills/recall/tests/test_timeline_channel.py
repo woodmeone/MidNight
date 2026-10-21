@@ -184,6 +184,29 @@ def test_inverted_range_is_rejected(base, capsys):
     assert '区间为空' in capsys.readouterr().err
 
 
+def test_overlong_literal_is_rejected_not_like_crash(base, capsys):
+    """超长字面会触发 SQLite `LIKE or GLOB pattern too complex`——那是崩溃。
+
+    CLI 必须把它变成"参数写错了"（退出码 2），而不是让用户看见底层 SQL 异常。
+    """
+    _seed('probe')
+    rc = recall_main(['--literal', 'x' * 500, '--identity', 'probe'])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert '200' in err
+
+
+def test_broken_db_reports_clearly(base, capsys):
+    """库文件损坏时给人话，不甩 sqlite3.DatabaseError。"""
+    ensure_agent('probe')
+    bad = os.path.join(get_agent_dir('probe'), 'recall.db')
+    with open(bad, 'wb') as f:
+        f.write(b'not a database' * 20)
+    rc = recall_main(['--timeline', '3', '--identity', 'probe'])
+    assert rc == 2
+    assert '记忆库不可用' in capsys.readouterr().err
+
+
 def test_literal_marks_gap_between_non_adjacent_chunks(base):
     """命中块不连续时必须留省略号，不能把不相邻的正文拼成"连续上下文"。"""
     db = _seed('probe')

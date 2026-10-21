@@ -323,6 +323,11 @@ TIMELINE_HEADER = "[回忆] 以下是你的记忆时间轴（按日期倒序，�
 LITERAL_HEADER = "[回忆] 以下是字面命中的记忆（按日期倒序，取自记忆库）：\n"
 
 
+# 字面命中的长度上限。SQLite 的 LIKE 模式过长会直接抛
+# `OperationalError: LIKE or GLOB pattern too complex`——那是崩溃，不是"没找到"。
+# 字面检索本来就是查短语的，200 字足够，超了明确报错比抛底层异常好。
+MAX_LITERAL_CHARS = 200
+
 # 日期参数格式：只接受 YYYY-MM-DD。
 # 为什么严格：`--until 2026-9-1`（未补零）在字符串比较下**不会报错**，只会静默返回
 # "没有记忆"——把格式错误伪装成"我没记过这件事"，比直接报错危险得多。
@@ -366,12 +371,19 @@ def _date_clause(alias: str, since: Optional[str], until: Optional[str]):
 
 
 def _open_ready(db_path: str) -> sqlite3.Connection:
-    """打开库并把 schema 补齐（旧库可能缺表），返回带 row_factory 的连接。"""
+    """打开库并把 schema 补齐（旧库可能缺表），返回带 row_factory 的连接。
+
+    坏库（不是 SQLite 文件 / 被其他程序占着写）给出**说明白**的错误，
+    而不是把 `sqlite3.DatabaseError: file is not a database` 直接甩给用户。
+    """
     from scripts.schema import init_db
-    init_db(db_path).close()
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        init_db(db_path).close()
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(f"记忆库不可用（{db_path}）：{exc}") from exc
 
 
 def timeline_recall(db_path: str, k: int = 5, since: str = None,
@@ -426,6 +438,8 @@ def literal_recall(db_path: str, text: str, k: int = 10, since: str = None,
     text = (text or '').strip()
     if not text or not k or k <= 0:
         return []
+    if len(text) > MAX_LITERAL_CHARS:
+        raise ValueError(f"字面检索最多 {MAX_LITERAL_CHARS} 字，收到 {len(text)} 字")
     pattern = '%' + _escape_like(text) + '%'
     conn = _open_ready(db_path)
     try:
@@ -907,10 +921,18 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 2
         if literal is not None:
-            results = literal_recall(db_file, literal, k=k, since=since, until=until)
+            try:
+                results = literal_recall(db_file, literal, k=k, since=since, until=until)
+            except ValueError as exc:
+                print(f"Usage: {exc}", file=sys.stderr)
+                return 2
             channel, header, q = 'literal', LITERAL_HEADER, literal
         else:
-            results = timeline_recall(db_file, k=timeline, since=since, until=until)
+            try:
+                results = timeline_recall(db_file, k=timeline, since=since, until=until)
+            except ValueError as exc:
+                print(f"Usage: {exc}", file=sys.stderr)
+                return 2
             channel, header = 'timeline', TIMELINE_HEADER
             q = f'最近 {timeline} 篇' + (f' since={since}' if since else '') \
                 + (f' until={until}' if until else '')
