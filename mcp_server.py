@@ -77,6 +77,49 @@ async def recall_search(
 
 
 @server.tool(
+    name="recall_timeline",
+    title="记忆时间轴（确定性通道）",
+    description="按日期倒序列出最近的记忆，回答「最新一条是哪天 / 记到哪一天 / 某个日期之后还有没有」。库内直查，不读 md 文件，不需要 embedding。",
+)
+async def recall_timeline(agent: str = "default", n: int = 5,
+                          since: str = "", until: str = "") -> str:
+    """确定性时间轴。agent 必填——回答的是「我的记忆」，不许落到兜底库。"""
+    args = ["--timeline", str(n), "--agent", agent]
+    if since:
+        args += ["--since", since]
+    if until:
+        args += ["--until", until]
+    return _run_py("recall", "recall.py", args)
+
+
+@server.tool(
+    name="recall_literal",
+    title="字面命中（确定性通道）",
+    description="在记忆正文中做字面匹配，回答「有没有提过 X 这个词」。% 和 _ 按字面处理，不当通配符。库内直查，不读 md 文件。",
+)
+async def recall_literal(agent: str = "default", text: str = "",
+                         k: int = 10, since: str = "", until: str = "") -> str:
+    """确定性字面命中。"""
+    args = ["--literal", text, "--agent", agent, "--k", str(k)]
+    if since:
+        args += ["--since", since]
+    if until:
+        args += ["--until", until]
+    return _run_py("recall", "recall.py", args)
+
+
+@server.tool(
+    name="recall_audit",
+    title="检索留痕审计",
+    description="查看该 agent 最近若干次检索到底走了哪条通道、查了什么、命中几条。用于核对「记忆检索是否真的走了算法」。",
+)
+async def recall_audit(agent: str = "default", limit: int = 20) -> str:
+    """读取 retrieval_ledger.jsonl。"""
+    return _run_py("recall", "recall.py",
+                   ["--audit", str(limit), "--agent", agent])
+
+
+@server.tool(
     name="recall_auto",
     title="自动路由记忆召回",
     description="自动判断查询属于哪个 agent（语义匹配 agent 描述），再在该 agent 的记忆库中召回。",

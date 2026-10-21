@@ -3,6 +3,7 @@
 CLI: python recall.py --query "..." [--k 10] [--db PATH] [--key KEY]
 """
 import os
+import re
 import sys
 import sqlite3
 import struct
@@ -17,6 +18,12 @@ from scripts.config import (  # noqa: E402
 )
 from scripts.ngrams import candidate_grams  # noqa: E402
 from scripts.cache import _cache_key, cache_get, cache_set  # noqa: E402
+from scripts.ledger import (  # noqa: E402
+    DEFAULT_AUDIT_LIMIT,
+    append_entry as ledger_append,
+    format_entries,
+    read_entries as ledger_read_entries,
+)
 
 # 词面锚定阈值：非 default agent 需与查询共享 ≥ 该数量的汉字才算"可信候选"，
 # 防止泛化/情绪化查询（无领域词）被 embedding 相似度误导而路由到某个私人 agent。
@@ -232,17 +239,22 @@ def auto_recall(query: str, embedding_client, k: int = 10,
     return {**best, 'ambiguous': ambiguous, 'results': results}
 
 
-def format_recall_output(results: list[dict], max_chars: int = None) -> str:
+def format_recall_output(results: list[dict], max_chars: int = None,
+                         header: str = None) -> str:
     """Format recall results as a context-injectable text block.
 
     默认**保留完整 chunk，不硬截断**（语义优先：截断会在句子中间拦腰切断，破坏信息）。
     只当调用方显式传 `max_chars` 时才按字符截断（向后兼容的历史兜底）；
     上下文体积控制应走 `fit_to_budget` 的按预算收条，而不是靠截断单条。
+
+    `header` 缺省（None）时输出与历史逐字节一致——确定性通道（时间轴/字面）
+    传入自己的表头，表明"这是按时间排的，不是按相关度"。
     """
     if not results:
         return "[回忆] 暂无相关记忆。"
 
-    lines = ["[回忆] 以下是相关记忆（来源于你的日记，按相关度排序）：\n"]
+    headline = header or "[回忆] 以下是相关记忆（来源于你的日记，按相关度排序）：\n"
+    lines = [headline]
     for r in results:
         date_part = f"（{r['date']}）" if r['date'] else ""
         content = r['content']
@@ -304,6 +316,165 @@ def fit_to_budget(results: list[dict], budget_chars: int = None) -> list[dict]:
         fitted.append(r)
         used += length
     return fitted
+
+
+# 确定性通道表头：明说"按日期排"，避免下游把它误读成相关度排序。
+TIMELINE_HEADER = "[回忆] 以下是你的记忆时间轴（按日期倒序，取自记忆库，不是 md 文件）：\n"
+LITERAL_HEADER = "[回忆] 以下是字面命中的记忆（按日期倒序，取自记忆库）：\n"
+
+
+# 字面命中的长度上限。SQLite 的 LIKE 模式过长会直接抛
+# `OperationalError: LIKE or GLOB pattern too complex`——那是崩溃，不是"没找到"。
+# 字面检索本来就是查短语的，200 字足够，超了明确报错比抛底层异常好。
+MAX_LITERAL_CHARS = 200
+
+# 日期参数格式：只接受 YYYY-MM-DD。
+# 为什么严格：`--until 2026-9-1`（未补零）在字符串比较下**不会报错**，只会静默返回
+# "没有记忆"——把格式错误伪装成"我没记过这件事"，比直接报错危险得多。
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _normalize_date(value: Optional[str], flag: str) -> Optional[str]:
+    """校验并规范化日期参数；非法格式抛 ValueError（由 CLI 转成退出码 2）。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not _DATE_RE.match(text):
+        raise ValueError(f"{flag} 需要 YYYY-MM-DD 格式，收到 {value!r}")
+    return text
+
+
+def _escape_like(text: str) -> str:
+    """把 LIKE 的通配符转义成字面：`%`/`_`/`\\` 必须当普通字符。"""
+    return (text.replace('\\', '\\\\')
+                .replace('%', '\\%')
+                .replace('_', '\\_'))
+
+
+def _date_clause(alias: str, since: Optional[str], until: Optional[str]):
+    """日期闭区间 SQL 片段。
+
+    对 `diary_date` 优先、缺失时回退 `created_at`；**两者都截到 10 位**再比较。
+    为什么必须截断：旧库里 `diary_date` 可能为 NULL，回退到 `created_at` 时是
+    `YYYY-MM-DD HH:MM:SS` 全时间戳，而 `--until 2026-09-22` 是日期串——
+    直接比较会因 `'2026-09-22 10:00:00' > '2026-09-22'` 把当天的记忆误排除。
+    """
+    expr = f"substr(COALESCE({alias}.diary_date, {alias}.created_at), 1, 10)"
+    sql, params = '', []
+    if since:
+        sql += f" AND {expr} >= ?"
+        params.append(since)
+    if until:
+        sql += f" AND {expr} <= ?"
+        params.append(until)
+    return sql, params
+
+
+def _open_ready(db_path: str) -> sqlite3.Connection:
+    """打开库并把 schema 补齐（旧库可能缺表），返回带 row_factory 的连接。
+
+    坏库（不是 SQLite 文件 / 被其他程序占着写）给出**说明白**的错误，
+    而不是把 `sqlite3.DatabaseError: file is not a database` 直接甩给用户。
+    """
+    from scripts.schema import init_db
+    try:
+        init_db(db_path).close()
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(f"记忆库不可用（{db_path}）：{exc}") from exc
+
+
+def timeline_recall(db_path: str, k: int = 5, since: str = None,
+                    until: str = None) -> list[dict]:
+    """确定性时间轴：最近 k 篇日记，按 diary_date 倒序。
+
+    与联想召回的差别是**排序口径**（时间，不是相关度），但共用同一份结果 dict
+    与同一条注入管线（去重/预算/格式化），所以下游无需区分两条通道。
+
+    日记按 file 级聚合：一篇日记切成多块时只出现一次，正文按 chunk_index 拼回。
+    """
+    if not k or k <= 0:
+        return []
+    conn = _open_ready(db_path)
+    try:
+        clause, params = _date_clause('f', since, until)
+        files = conn.execute(
+            "SELECT f.id, substr(COALESCE(f.diary_date, f.created_at), 1, 10) AS date, "
+            "f.file_path "
+            "FROM files f "
+            "WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id) "
+            + clause +
+            " ORDER BY date DESC, f.id DESC LIMIT ?",
+            (*params, k)).fetchall()
+        out = []
+        for f in files:
+            rows = conn.execute(
+                "SELECT id, content, importance FROM chunks "
+                "WHERE file_id = ? ORDER BY chunk_index ASC", (f['id'],)).fetchall()
+            if not rows:
+                continue
+            out.append({
+                'chunk_id': rows[0]['id'],
+                'content': '\n\n'.join(r['content'] for r in rows),
+                'date': f['date'],
+                'score': 1.0,          # 时间轴不产出相关度；保留字段以统一下游
+                'file_path': f['file_path'],
+                'importance': rows[0]['importance'] or 'medium',
+            })
+        return out
+    finally:
+        conn.close()
+
+
+def literal_recall(db_path: str, text: str, k: int = 10, since: str = None,
+                   until: str = None) -> list[dict]:
+    """确定性字面命中：正文包含该词的 chunk（file 级聚合，命中块按序拼接）。
+
+    存在的唯一理由：回答"有没有提过 X 这个词"，而这是向量检索答不准的问题。
+    通配符按字面处理（`%` 不会被当成"全部"），否则这个通道比 grep 还危险。
+    """
+    text = (text or '').strip()
+    if not text or not k or k <= 0:
+        return []
+    if len(text) > MAX_LITERAL_CHARS:
+        raise ValueError(f"字面检索最多 {MAX_LITERAL_CHARS} 字，收到 {len(text)} 字")
+    pattern = '%' + _escape_like(text) + '%'
+    conn = _open_ready(db_path)
+    try:
+        clause, params = _date_clause('f', since, until)
+        rows = conn.execute(
+            "SELECT c.id, c.file_id, c.chunk_index, c.content, c.importance, "
+            "substr(COALESCE(f.diary_date, f.created_at), 1, 10) AS date, f.file_path "
+            "FROM chunks c JOIN files f ON c.file_id = f.id "
+            "WHERE lower(c.content) LIKE lower(?) ESCAPE '\\' " + clause +
+            " ORDER BY date DESC, c.file_id DESC, c.chunk_index ASC",
+            (pattern, *params)).fetchall()
+        grouped, order = {}, []
+        for r in rows:
+            fid = r['file_id']
+            if fid not in grouped:
+                grouped[fid] = {
+                    'chunk_id': r['id'],
+                    'content': r['content'],
+                    'date': r['date'],
+                    'score': 1.0,
+                    'file_path': r['file_path'],
+                    'importance': r['importance'] or 'medium',
+                    'chunk_indexes': [r['chunk_index']],
+                }
+                order.append(fid)
+            else:
+                # 命中的块可能不连续（1、5 命中，2–4 没命中）。中间用省略号隔开，
+                # 否则读者会把两段不相邻的正文当成连续上下文——拼得好看但骗人。
+                last = grouped[fid]['chunk_indexes'][-1]
+                sep = '\n\n' if r['chunk_index'] == last + 1 else '\n\n…\n\n'
+                grouped[fid]['content'] += sep + r['content']
+                grouped[fid]['chunk_indexes'].append(r['chunk_index'])
+        return [grouped[fid] for fid in order[:k]]
+    finally:
+        conn.close()
 
 
 def mmr_rerank(candidates: list[dict], query_vec: list[float],
@@ -612,6 +783,32 @@ def recall_associative(query: str, db_path: str, embedding_client,
     return result
 
 
+def _ledger_append(agent, channel: str, query: str, results, extra: dict = None):
+    """CLI 层留痕（双保险）：ledger 内部已吞异常，这里再挡一次。
+
+    留痕是**旁路**——任何失败都不能改变检索的返回值和退出码。
+    """
+    try:
+        return ledger_append(channel, query, results, agent=agent, extra=extra)
+    except Exception:      # noqa: BLE001
+        return False
+
+
+def _take_value(argv, i: int, flag: str):
+    """取 flag 的值；下一个 token 是另一个 flag 时视为"缺值"。
+
+    为什么必须显式拒绝：PowerShell 会把空字符串参数丢掉（`--literal "" --identity X`
+    到程序里变成 `--literal --identity X`），若照常吞值就会把 `--identity` 当成搜索词，
+    用户看到的是"查不到记忆"而不是"参数写错了"——静默失败比报错危险得多。
+    """
+    if i + 1 >= len(argv):
+        raise ValueError(f"{flag} 缺少值")
+    value = argv[i + 1]
+    if isinstance(value, str) and value.startswith('--'):
+        raise ValueError(f"{flag} 缺少值（下一个参数是 {value}）")
+    return value
+
+
 def main(argv=None) -> int:
     """CLI: python recall.py --query '...' [--auto] [--k N] [--agent NAME]
     [--db PATH] [--key KEY] [--prefilter]
@@ -628,6 +825,11 @@ def main(argv=None) -> int:
     api_key = os.environ.get('SILICONFLOW_API_KEY', '')
     prefilter = False
     reward = False
+    audit = None
+    timeline = None
+    literal = None
+    since = None
+    until = None
 
     i = 0
     while i < len(argv):
@@ -638,6 +840,30 @@ def main(argv=None) -> int:
         elif arg == '--k' and i + 1 < len(argv):
             k = int(argv[i + 1])
             i += 2
+        elif arg == '--timeline' and i + 1 < len(argv):
+            timeline = int(argv[i + 1])
+            i += 2
+        elif arg == '--literal':
+            try:
+                literal = _take_value(argv, i, '--literal')
+            except ValueError as exc:
+                print(f"Usage: {exc}", file=sys.stderr)
+                return 2
+            i += 2
+        elif arg == '--since' and i + 1 < len(argv):
+            since = argv[i + 1]
+            i += 2
+        elif arg == '--until' and i + 1 < len(argv):
+            until = argv[i + 1]
+            i += 2
+        elif arg == '--audit':
+            # 可选值：`--audit 5` 看最近 5 条，`--audit` 用默认条数
+            if i + 1 < len(argv) and argv[i + 1].isdigit():
+                audit = int(argv[i + 1])
+                i += 2
+            else:
+                audit = DEFAULT_AUDIT_LIMIT
+                i += 1
         elif arg == '--auto':
             auto = True
             i += 1
@@ -675,6 +901,57 @@ def main(argv=None) -> int:
         print(f"[开户] 已为智能体「{agent}」建立记忆区并登记身份。")
         return 0
 
+    # 确定性通道：时间轴 / 字面命中。库内直查，不需要 embedding（无模型也能答）。
+    # 强制显式身份：这两条通道回答的是"我的记忆"，静默落到 env/default 库会串号。
+    if timeline is not None or literal is not None:
+        if not agent:
+            print("Usage: --timeline/--literal 必须显式指定 --identity/--agent"
+                  "（不允许静默落到 env/default 库）", file=sys.stderr)
+            return 2
+        ensure_agent(agent)
+        db_file = db_path or get_db_path(agent)
+        try:
+            since = _normalize_date(since, '--since')
+            until = _normalize_date(until, '--until')
+        except ValueError as exc:
+            print(f"Usage: {exc}", file=sys.stderr)
+            return 2
+        if since and until and since > until:
+            print(f"Usage: --since ({since}) 晚于 --until ({until})，区间为空",
+                  file=sys.stderr)
+            return 2
+        if literal is not None:
+            try:
+                results = literal_recall(db_file, literal, k=k, since=since, until=until)
+            except ValueError as exc:
+                print(f"Usage: {exc}", file=sys.stderr)
+                return 2
+            channel, header, q = 'literal', LITERAL_HEADER, literal
+        else:
+            try:
+                results = timeline_recall(db_file, k=timeline, since=since, until=until)
+            except ValueError as exc:
+                print(f"Usage: {exc}", file=sys.stderr)
+                return 2
+            channel, header = 'timeline', TIMELINE_HEADER
+            q = f'最近 {timeline} 篇' + (f' since={since}' if since else '') \
+                + (f' until={until}' if until else '')
+        results = dedupe_results(fit_to_budget(results, budget))
+        print(format_recall_output(results, header=header))
+        _ledger_append(agent, channel, q, results,
+                       {'since': since, 'until': until, 'k': k})
+        return 0
+
+    if since or until:
+        print("Usage: --since/--until 只能与 --timeline 或 --literal 一起用",
+              file=sys.stderr)
+        return 2
+
+    # --audit：只读留痕，不召回、不需要 embedding（审计要在任何环境下都能跑）
+    if audit is not None:
+        print(format_entries(ledger_read_entries(agent, limit=audit), agent))
+        return 0
+
     if not query:
         print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY] [--budget N]", file=sys.stderr)
         return 1
@@ -694,6 +971,8 @@ def main(argv=None) -> int:
             feedback_reward(get_db_path(agent), [r['chunk_id'] for r in results])
         output = format_recall_output(results)
         print(output)
+        _ledger_append(agent, 'associative', query, results,
+                       {'k': k, 'prefilter': prefilter, 'budget': budget})
         return 0
 
     if auto:
@@ -705,6 +984,8 @@ def main(argv=None) -> int:
             feedback_reward(get_db_path(result['name']), [r['chunk_id'] for r in results])
         output = format_recall_output(results)
         print(output)
+        _ledger_append(result.get('name') or agent, 'associative', query, results,
+                       {'route': 'auto', 'k': k, 'prefilter': prefilter})
         return 0
 
     db_path = db_path or get_db_path(agent)
@@ -715,6 +996,8 @@ def main(argv=None) -> int:
         feedback_reward(db_path, [r['chunk_id'] for r in results])
     output = format_recall_output(results)
     print(output)
+    _ledger_append(agent, 'associative', query, results,
+                   {'k': k, 'prefilter': prefilter, 'db': db_path})
     return 0
 
 
