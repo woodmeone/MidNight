@@ -17,6 +17,12 @@ from scripts.config import (  # noqa: E402
 )
 from scripts.ngrams import candidate_grams  # noqa: E402
 from scripts.cache import _cache_key, cache_get, cache_set  # noqa: E402
+from scripts.ledger import (  # noqa: E402
+    DEFAULT_AUDIT_LIMIT,
+    append_entry as ledger_append,
+    format_entries,
+    read_entries as ledger_read_entries,
+)
 
 # 词面锚定阈值：非 default agent 需与查询共享 ≥ 该数量的汉字才算"可信候选"，
 # 防止泛化/情绪化查询（无领域词）被 embedding 相似度误导而路由到某个私人 agent。
@@ -612,6 +618,17 @@ def recall_associative(query: str, db_path: str, embedding_client,
     return result
 
 
+def _ledger_append(agent, channel: str, query: str, results, extra: dict = None):
+    """CLI 层留痕（双保险）：ledger 内部已吞异常，这里再挡一次。
+
+    留痕是**旁路**——任何失败都不能改变检索的返回值和退出码。
+    """
+    try:
+        return ledger_append(channel, query, results, agent=agent, extra=extra)
+    except Exception:      # noqa: BLE001
+        return False
+
+
 def main(argv=None) -> int:
     """CLI: python recall.py --query '...' [--auto] [--k N] [--agent NAME]
     [--db PATH] [--key KEY] [--prefilter]
@@ -628,6 +645,7 @@ def main(argv=None) -> int:
     api_key = os.environ.get('SILICONFLOW_API_KEY', '')
     prefilter = False
     reward = False
+    audit = None
 
     i = 0
     while i < len(argv):
@@ -638,6 +656,14 @@ def main(argv=None) -> int:
         elif arg == '--k' and i + 1 < len(argv):
             k = int(argv[i + 1])
             i += 2
+        elif arg == '--audit':
+            # 可选值：`--audit 5` 看最近 5 条，`--audit` 用默认条数
+            if i + 1 < len(argv) and argv[i + 1].isdigit():
+                audit = int(argv[i + 1])
+                i += 2
+            else:
+                audit = DEFAULT_AUDIT_LIMIT
+                i += 1
         elif arg == '--auto':
             auto = True
             i += 1
@@ -675,6 +701,11 @@ def main(argv=None) -> int:
         print(f"[开户] 已为智能体「{agent}」建立记忆区并登记身份。")
         return 0
 
+    # --audit：只读留痕，不召回、不需要 embedding（审计要在任何环境下都能跑）
+    if audit is not None:
+        print(format_entries(ledger_read_entries(agent, limit=audit), agent))
+        return 0
+
     if not query:
         print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY] [--budget N]", file=sys.stderr)
         return 1
@@ -694,6 +725,8 @@ def main(argv=None) -> int:
             feedback_reward(get_db_path(agent), [r['chunk_id'] for r in results])
         output = format_recall_output(results)
         print(output)
+        _ledger_append(agent, 'associative', query, results,
+                       {'k': k, 'prefilter': prefilter, 'budget': budget})
         return 0
 
     if auto:
@@ -705,6 +738,8 @@ def main(argv=None) -> int:
             feedback_reward(get_db_path(result['name']), [r['chunk_id'] for r in results])
         output = format_recall_output(results)
         print(output)
+        _ledger_append(result.get('name') or agent, 'associative', query, results,
+                       {'route': 'auto', 'k': k, 'prefilter': prefilter})
         return 0
 
     db_path = db_path or get_db_path(agent)
@@ -715,6 +750,8 @@ def main(argv=None) -> int:
         feedback_reward(db_path, [r['chunk_id'] for r in results])
     output = format_recall_output(results)
     print(output)
+    _ledger_append(agent, 'associative', query, results,
+                   {'k': k, 'prefilter': prefilter, 'db': db_path})
     return 0
 
 
