@@ -15,23 +15,33 @@ description: "让 AI 拥有长期记忆——自动写日记、联想式召回�
 4. **可配置**：召回数量（`--k`）、联想强度、时间权重、截断比例（`--truncate`，按条数比例裁剪）均可调。
 5. **注入保留完整 + 预算控体积**：召回的记忆默认**保留完整正文、不拦腰截断**（语义优先）；若担心上下文/token 被撑爆，传 `--budget <字符数>` 按预算召回最高相关的那几条完整记忆即可。
 
-## 检索通道铁律（默认走算法，不翻原文）
+## 检索铁律（一条主干 + 两个约束，默认走算法不翻原文）
 
-回答任何"你还记得…"的问题，只有三条合法通道，**默认且优先用第 1 条**：
+检索只有**一个主干**，外加**两个可选约束**。不要把它理解成三条并列的通道——
 
-| # | 通道 | 命令 | 什么时候用 |
-|---|---|---|---|
-| 1 | **联想通道**（默认） | `prep.py --message "..." --query "<你抽出的线索>" --identity <我的名字> --multi-scale` | 一切语义召回：聊过什么、当时怎么想、那个人是谁、那件事的前因后果 |
-| 2 | **确定性通道** | `recall.py --timeline N --identity <名字>`（时间轴）／`--literal "词语"`（字面命中）／可加 `--since` `--until` | 结构性时间与精确字面问题：最新一条是哪天、记到哪一天、某个日期之后还有没有、有没有提过某个词 |
-| 3 | **md 原文**（例外） | `read` / `grep` `dailynote/*.md` | **仅当用户明确说"读原文 / 看文件 / 把日记打开"** |
+| 角色 | 是什么 | 命令 |
+|---|---|---|
+| **主干**（默认） | 联想排序：向量 KNN + 标签脉冲 + 时间加权 + tag-first 扩增 + MMR。决定"哪条最像" | `prep.py --message "..." --query "<你抽出的线索>" --identity <我的名字> --multi-scale` |
+| **约束 A：时间窗** | 决定"在哪个时间段的记忆里找"。作用在候选池上，**不是排序** | 主干命令后加 `--since YYYY-MM-DD` / `--until YYYY-MM-DD` |
+| **约束 B：字面** | 决定"正文必须真的含这个词"。等价于直接把候选池压成含该字的那些 | `recall.py --literal "词语" --identity <名字>`（可加时间窗） |
+| **退化形态：时间轴** | 只要时间顺序、不要语义排序时用——回答"最新一条是哪天 / 记到哪一天" | `recall.py --timeline N --identity <名字>` |
+| **例外：md 原文** | **仅当用户明确说"读原文 / 看文件 / 把日记打开"** | `read` / `grep` `dailynote/*.md` |
+
+关键区别（别搞混）：**约束是过滤候选池，主干是排序**。所以"十月以后关于备课的"一次问出口就行：
+
+```bash
+python prep.py --message "..." --query "备课 教案 学情" --identity qinglan --since 2026-10-01
+```
+
+时间窗会同时压住向量候选池和**标签扩增**两处——否则窗外记忆会从标签后门溜回来。
 
 **铁律**：
 
 - `dailynote/*.md` 是**源**（ingest 的输入、备份本体、人可读存档），**永远不是检索目标**。检索的索引只有 `recall.db`。
-- 用了第 3 条通道，必须在回复里**明说**："这条是按你要求读的原文，不是联想召回"，并说明为什么算法不够用。
-- **自检触发点**：一旦发现自己的下一步是 `ls` / `grep` / `read` `~/.midnight/recall/*/dailynote/`，**停手**，改跑第 2 条通道。想不出对应的确定性命令时，退回第 1 条并如实说"具体日期我记不清"——**编造不如承认**。
-- 三条通道共享同一套约束：`--identity` 锁区（禁止跨 agent）、`[回忆]` 输出格式、去重与 `--budget` 预算。
-- 每次 CLI 检索都会留一行痕（`<agent>/retrieval_ledger.jsonl`）：`prep.py`、`recall.py --query`、`--timeline`、`--literal` 全覆盖。用户可用 `recall.py --audit 10 --identity <名字>` 反查这一轮到底查没查——**不要试图绕过它，也不要用脚本伪造它**。
+- 用了 md 原文，必须在回复里**明说**："这条是按你要求读的原文，不是联想召回"，并说明为什么算法不够用。
+- **自检触发点**：一旦发现自己的下一步是 `ls` / `grep` / `read` `~/.midnight/recall/*/dailynote/`，**停手**，改用主干/约束。想不出怎么查时，如实说"具体日期我记不清"——**编造不如承认**。
+- 所有路径共享同一套约束：`--identity` 锁区（禁止跨 agent）、`[回忆]` 输出格式、去重与 `--budget` 预算、时间窗闭区间。
+- 每次 CLI 检索都会留一行痕（`<agent>/retrieval_ledger.jsonl`）：`prep.py`、`recall.py --query`、`--timeline`、`--literal` 全覆盖，窗口也记进 `extra.since/extra.until`。用户可用 `recall.py --audit 10 --identity <名字>` 反查——**不要试图绕过它，也不要用脚本伪造它**。
 
 ## 查询派生协议（"自主剖析关键词"怎么做）
 
@@ -54,6 +64,7 @@ description: "让 AI 拥有长期记忆——自动写日记、联想式召回�
 | "还记得吗" / "你记得" / "帮我回忆" | 运行 `prep.py`（触发词命中必召回） |
 | 新会话开始 | 运行 `prep.py` 带时间连续性，自动补最近记忆 |
 | 用户说"我上次说" / "之前提到" | 运行 `prep.py` 做联想召回 |
+| **"十月以后关于备课的"**（时间 × 语义） | `prep.py --query "备课 教案" --identity <名字> --since 2026-10-01`——**约束加在主干上，一次调用** |
 | "最新一条是哪天" / "记到哪一天" / "某天之后还有吗" | 运行 `recall.py --timeline N --identity <名字>`（可加 `--since/--until`）——**不要 ls/grep dailynote** |
 | "有没有提过 X" / "我说过某句话没" | 运行 `recall.py --literal "X" --identity <名字>`（通配符按字面处理） |
 | 用户要核对"你到底查没查记忆" | 运行 `recall.py --audit 10 --identity <名字>` |
@@ -146,11 +157,18 @@ python prep.py --message "用户原话" --query "焦虑 睡眠" --identity qingl
 
 # 高级开关：多尺度线索提取 / MMR 多样性重排（默认关闭）
 python prep.py --message "..." --identity qinglan --multi-scale --mmr 0.5
+
+# 时间窗约束（Issue #7）：「十月以后关于备课的」一次问出口
+python prep.py --message "..." --query "备课 教案 学情" --identity qinglan --since 2026-10-01
+python prep.py --message "..." --query "备课" --identity qinglan --since 2026-09-01 --until 2026-09-30
 ```
 
 `prep.py` 被门控挡下（纯寒暄/短消息且无触发词）时不打印任何内容——据此跳过注入即可。
 
-**确定性通道（问日期/问"有没有提过"时用，不需要 embedding、不读 md）**：
+`--since/--until` 是**闭区间**、只接受 `YYYY-MM-DD`；格式写错会直接报错（退出码 2），
+不会静默返回"没记忆"——把参数错误伪装成"我没记过这件事"是最坏的一种失败。
+
+**约束的退化形态（问日期 / 问"有没有提过"时用；不需要 embedding、不读 md）**：
 
 ```bash
 # 时间轴：最近 3 篇，按 diary_date 倒序（file 级去重，多块正文按块序拼回）
@@ -159,7 +177,7 @@ python recall.py --timeline 3 --identity qinglan
 # 时间区间（闭区间，可与 --timeline / --literal 组合）
 python recall.py --timeline 10 --since 2026-09-17 --until 2026-09-22 --identity qinglan
 
-# 字面命中：正文包含该词（% 和 _ 按字面处理，不当通配符）
+# 字面约束：正文包含该词（% 和 _ 按字面处理，不当通配符）
 python recall.py --literal "中立不追究" --identity qinglan
 ```
 

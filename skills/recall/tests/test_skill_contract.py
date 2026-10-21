@@ -16,6 +16,7 @@ SKILL = os.path.join(REPO_ROOT, 'skills', 'recall', 'SKILL.md')
 PROJECT = os.path.join(REPO_ROOT, 'PROJECT.md')
 CONTEXT = os.path.join(REPO_ROOT, 'CONTEXT.md')
 ADR2 = os.path.join(REPO_ROOT, 'docs', 'adr', '0002-md-is-source-not-index.md')
+ADR3 = os.path.join(REPO_ROOT, 'docs', 'adr', '0003-associative-trunk-with-constraints.md')
 
 
 def _read(path):
@@ -29,18 +30,35 @@ def skill():
 
 
 # ============================================================
-# 1. 通道铁律：三条通道 + md 不是索引 + 例外条件
+# 1. 检索铁律：一条主干 + 两个约束 + md 不是索引 + 例外条件
 # ============================================================
 
-def test_skill_declares_three_channels(skill):
-    assert '检索通道铁律' in skill
-    assert '联想通道' in skill
-    assert '确定性通道' in skill
+def test_skill_declares_trunk_plus_constraints(skill):
+    """ADR-0003：检索是「一条主干 + 两个约束」，不是三条并列通道。"""
+    assert '检索铁律' in skill
+    assert '主干' in skill
+    assert '约束 A：时间窗' in skill
+    assert '约束 B：字面' in skill
     assert '--timeline' in skill
     assert '--literal' in skill
+    assert '--since' in skill and '--until' in skill
 
 
-def test_skill_forbids_md_as_retrieval_target(skill):
+def test_skill_states_constraint_is_not_ranking(skill):
+    """最容易搞混的一句：约束过滤候选池，主干才排序。"""
+    assert '约束是过滤候选池' in skill
+    assert '主干是排序' in skill
+
+
+def test_skill_shows_combined_time_semantic_query(skill):
+    """「十月以后关于备课的」必须能一次问出口，不是两次调用再对齐。"""
+    assert '--since 2026-10-01' in skill
+    hits = [l for l in skill.splitlines() if '--since 2026-10-01' in l]
+    assert hits
+    assert any('--query' in l for l in hits), '合并查询示例里必须有 --query'
+
+
+def test_skill_says_md_is_not_index_but_constraints_are(skill):
     # 这句是整条铁律的核心：源 ≠ 索引
     assert '永远不是检索目标' in skill
     assert 'recall.db' in skill
@@ -111,11 +129,15 @@ def test_project_truth_updated():
     assert '--timeline' in project
     assert 'ADR-0002' in project
     assert '检索只走库' in project
+    # Issue #7 / ADR-0003：主干 + 约束
+    assert '联想主干' in project
+    assert '时间窗' in project
+    assert 'ADR-0003' in project
 
 
 def test_context_terms_added():
     context = _read(CONTEXT)
-    for term in ('检索通道', '联想通道', '确定性通道', '检索留痕', 'md 源文件'):
+    for term in ('检索通道', '联想主干', '时间窗约束', '字面约束', '检索留痕', 'md 源文件'):
         assert f'**{term}**' in context
 
 
@@ -125,3 +147,14 @@ def test_adr_0002_exists_and_has_three_parts():
     for part in ('## 背景', '## 决定', '## 后果'):
         assert part in adr
     assert '不是索引' in adr or '不作检索索引' in adr
+
+
+def test_adr_0003_exists_and_records_the_convergence():
+    """ADR-0003 必须写清"约束 ≠ 排序"以及时间窗要压两处。"""
+    assert os.path.exists(ADR3), 'ADR-0003 缺失'
+    adr = _read(ADR3)
+    for part in ('## 背景', '## 决定', '## 理由', '## 后果'):
+        assert part in adr
+    assert 'expand_tag_candidates' in adr, '必须写明标签扩增也要压窗口'
+    assert '缓存键' in adr
+    assert '排完再筛' in adr
