@@ -31,7 +31,7 @@ description: "让 AI 拥有长期记忆——自动写日记、联想式召回�
 - 用了第 3 条通道，必须在回复里**明说**："这条是按你要求读的原文，不是联想召回"，并说明为什么算法不够用。
 - **自检触发点**：一旦发现自己的下一步是 `ls` / `grep` / `read` `~/.midnight/recall/*/dailynote/`，**停手**，改跑第 2 条通道。想不出对应的确定性命令时，退回第 1 条并如实说"具体日期我记不清"——**编造不如承认**。
 - 三条通道共享同一套约束：`--identity` 锁区（禁止跨 agent）、`[回忆]` 输出格式、去重与 `--budget` 预算。
-- 每次 CLI 检索都会留一行痕（`<agent>/retrieval_ledger.jsonl`）。用户可用 `recall.py --audit 10 --identity <名字>` 反查这一轮到底查没查——**不要试图绕过它，也不要用脚本伪造它**。
+- 每次 CLI 检索都会留一行痕（`<agent>/retrieval_ledger.jsonl`）：`prep.py`、`recall.py --query`、`--timeline`、`--literal` 全覆盖。用户可用 `recall.py --audit 10 --identity <名字>` 反查这一轮到底查没查——**不要试图绕过它，也不要用脚本伪造它**。
 
 ## 查询派生协议（"自主剖析关键词"怎么做）
 

@@ -88,6 +88,14 @@ def test_skill_documents_ledger_and_audit(skill):
     assert '不要试图绕过它' in skill
 
 
+def test_skill_says_prep_is_covered_by_ledger(skill):
+    """默认入口 prep.py 必须也在留痕范围内——否则"每次检索都留痕"是假话。"""
+    assert 'prep.py' in skill
+    for line in skill.splitlines():
+        if 'retrieval_ledger.jsonl' in line:
+            assert 'prep.py' in line, f'留痕声明漏了默认入口：{line!r}'
+
+
 def test_skill_requires_identity_for_deterministic_channels(skill):
     assert '必须显式带 `--identity/--agent`' in skill or '必须显式带 --identity/--agent' in skill
 
