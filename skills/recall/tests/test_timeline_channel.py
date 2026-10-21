@@ -165,6 +165,25 @@ def test_until_includes_whole_day_when_date_has_time_part(base):
     assert [r['date'] for r in got] == ['2026-09-22', '2026-09-17', '2026-09-10', '2026-09-01']
 
 
+def test_bad_date_format_is_rejected_not_silently_empty(base, capsys):
+    """未补零的日期不会报错、只会静默返回"没记忆"——必须当参数错误拒绝。"""
+    _seed('probe')
+    for argv in (['--timeline', '3', '--since', '2026-9-1', '--identity', 'probe'],
+                 ['--timeline', '3', '--until', '2026/09/22', '--identity', 'probe'],
+                 ['--literal', 'x', '--since', 'yesterday', '--identity', 'probe']):
+        assert recall_main(argv) == 2
+    err = capsys.readouterr().err
+    assert 'YYYY-MM-DD' in err
+
+
+def test_inverted_range_is_rejected(base, capsys):
+    _seed('probe')
+    rc = recall_main(['--timeline', '3', '--since', '2026-09-22',
+                      '--until', '2026-09-01', '--identity', 'probe'])
+    assert rc == 2
+    assert '区间为空' in capsys.readouterr().err
+
+
 def test_literal_ascii_case_insensitive(base):
     db = _seed('probe')
     got = literal_recall(db, 'python', k=10)

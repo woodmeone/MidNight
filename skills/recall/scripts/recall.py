@@ -1,8 +1,9 @@
-﻿"""Recall — vector similarity search for midnight-recall memory store.
+"""Recall — vector similarity search for midnight-recall memory store.
 
 CLI: python recall.py --query "..." [--k 10] [--db PATH] [--key KEY]
 """
 import os
+import re
 import sys
 import sqlite3
 import struct
@@ -320,6 +321,22 @@ def fit_to_budget(results: list[dict], budget_chars: int = None) -> list[dict]:
 # 确定性通道表头：明说"按日期排"，避免下游把它误读成相关度排序。
 TIMELINE_HEADER = "[回忆] 以下是你的记忆时间轴（按日期倒序，取自记忆库，不是 md 文件）：\n"
 LITERAL_HEADER = "[回忆] 以下是字面命中的记忆（按日期倒序，取自记忆库）：\n"
+
+
+# 日期参数格式：只接受 YYYY-MM-DD。
+# 为什么严格：`--until 2026-9-1`（未补零）在字符串比较下**不会报错**，只会静默返回
+# "没有记忆"——把格式错误伪装成"我没记过这件事"，比直接报错危险得多。
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _normalize_date(value: Optional[str], flag: str) -> Optional[str]:
+    """校验并规范化日期参数；非法格式抛 ValueError（由 CLI 转成退出码 2）。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not _DATE_RE.match(text):
+        raise ValueError(f"{flag} 需要 YYYY-MM-DD 格式，收到 {value!r}")
+    return text
 
 
 def _escape_like(text: str) -> str:
@@ -854,6 +871,16 @@ def main(argv=None) -> int:
             return 2
         ensure_agent(agent)
         db_file = db_path or get_db_path(agent)
+        try:
+            since = _normalize_date(since, '--since')
+            until = _normalize_date(until, '--until')
+        except ValueError as exc:
+            print(f"Usage: {exc}", file=sys.stderr)
+            return 2
+        if since and until and since > until:
+            print(f"Usage: --since ({since}) 晚于 --until ({until})，区间为空",
+                  file=sys.stderr)
+            return 2
         if literal is not None:
             results = literal_recall(db_file, literal, k=k, since=since, until=until)
             channel, header, q = 'literal', LITERAL_HEADER, literal
