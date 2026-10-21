@@ -356,6 +356,10 @@ def _normalize_date(value: Optional[str], flag: str) -> Optional[str]:
     return text
 
 
+# 公开别名：prep.py 等调用方复用同一套日期口径，避免两处校验漂移。
+normalize_date = _normalize_date
+
+
 def _escape_like(text: str) -> str:
     """把 LIKE 的通配符转义成字面：`%`/`_`/`\\` 必须当普通字符。"""
     return (text.replace('\\', '\\\\')

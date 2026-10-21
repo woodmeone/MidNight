@@ -224,3 +224,39 @@ def test_auto_recall_passes_window(base):
     res = auto_recall('备课', client, k=10, since='2026-10-01')
     assert res['results']
     assert all(r['date'] >= '2026-10-01' for r in res['results'])
+
+
+# ============================================================
+# 7. 默认入口 prep.py 也要能吃窗口（Issue #7 票2）
+# ============================================================
+
+def test_prep_for_reply_accepts_window(db):
+    from scripts.prep import prep_for_reply
+    client = SemanticFakeEmbeddingClient()
+    out = prep_for_reply('备课', db_path=db, embedding_client=client, force=True,
+                         since='2026-10-01')
+    assert out['recalled'] is True
+    assert out['results']
+    assert all(r['date'] >= '2026-10-01' for r in out['results'])
+    assert '十月版本' in out['text']
+    assert '八月版本' not in out['text']
+
+
+def test_prep_cli_with_window_writes_ledger_with_window(db, capsys):
+    import scripts.prep as prep_mod
+    from scripts.ledger import read_entries
+    rc = prep_mod.main(['--message', '还记得备课吗', '--identity', 'probe',
+                        '--force', '--since', '2026-10-01'])
+    assert rc == 0
+    entry = read_entries('probe')[-1]
+    assert entry['extra'].get('since') == '2026-10-01'
+
+
+def test_prep_cli_without_window_is_unchanged(db, capsys):
+    import scripts.prep as prep_mod
+    rc = prep_mod.main(['--message', '还记得备课吗', '--identity', 'probe',
+                        '--force', '--k', '10'])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '八月版本' in out
+    assert '十月版本' in out
