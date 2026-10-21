@@ -774,6 +774,21 @@ def _ledger_append(agent, channel: str, query: str, results, extra: dict = None)
         return False
 
 
+def _take_value(argv, i: int, flag: str):
+    """取 flag 的值；下一个 token 是另一个 flag 时视为"缺值"。
+
+    为什么必须显式拒绝：PowerShell 会把空字符串参数丢掉（`--literal "" --identity X`
+    到程序里变成 `--literal --identity X`），若照常吞值就会把 `--identity` 当成搜索词，
+    用户看到的是"查不到记忆"而不是"参数写错了"——静默失败比报错危险得多。
+    """
+    if i + 1 >= len(argv):
+        raise ValueError(f"{flag} 缺少值")
+    value = argv[i + 1]
+    if isinstance(value, str) and value.startswith('--'):
+        raise ValueError(f"{flag} 缺少值（下一个参数是 {value}）")
+    return value
+
+
 def main(argv=None) -> int:
     """CLI: python recall.py --query '...' [--auto] [--k N] [--agent NAME]
     [--db PATH] [--key KEY] [--prefilter]
@@ -808,8 +823,12 @@ def main(argv=None) -> int:
         elif arg == '--timeline' and i + 1 < len(argv):
             timeline = int(argv[i + 1])
             i += 2
-        elif arg == '--literal' and i + 1 < len(argv):
-            literal = argv[i + 1]
+        elif arg == '--literal':
+            try:
+                literal = _take_value(argv, i, '--literal')
+            except ValueError as exc:
+                print(f"Usage: {exc}", file=sys.stderr)
+                return 2
             i += 2
         elif arg == '--since' and i + 1 < len(argv):
             since = argv[i + 1]
