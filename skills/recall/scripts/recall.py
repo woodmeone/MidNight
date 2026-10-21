@@ -238,17 +238,22 @@ def auto_recall(query: str, embedding_client, k: int = 10,
     return {**best, 'ambiguous': ambiguous, 'results': results}
 
 
-def format_recall_output(results: list[dict], max_chars: int = None) -> str:
+def format_recall_output(results: list[dict], max_chars: int = None,
+                         header: str = None) -> str:
     """Format recall results as a context-injectable text block.
 
     默认**保留完整 chunk，不硬截断**（语义优先：截断会在句子中间拦腰切断，破坏信息）。
     只当调用方显式传 `max_chars` 时才按字符截断（向后兼容的历史兜底）；
     上下文体积控制应走 `fit_to_budget` 的按预算收条，而不是靠截断单条。
+
+    `header` 缺省（None）时输出与历史逐字节一致——确定性通道（时间轴/字面）
+    传入自己的表头，表明"这是按时间排的，不是按相关度"。
     """
     if not results:
         return "[回忆] 暂无相关记忆。"
 
-    lines = ["[回忆] 以下是相关记忆（来源于你的日记，按相关度排序）：\n"]
+    headline = header or "[回忆] 以下是相关记忆（来源于你的日记，按相关度排序）：\n"
+    lines = [headline]
     for r in results:
         date_part = f"（{r['date']}）" if r['date'] else ""
         content = r['content']
@@ -310,6 +315,122 @@ def fit_to_budget(results: list[dict], budget_chars: int = None) -> list[dict]:
         fitted.append(r)
         used += length
     return fitted
+
+
+# 确定性通道表头：明说"按日期排"，避免下游把它误读成相关度排序。
+TIMELINE_HEADER = "[回忆] 以下是你的记忆时间轴（按日期倒序，取自记忆库，不是 md 文件）：\n"
+LITERAL_HEADER = "[回忆] 以下是字面命中的记忆（按日期倒序，取自记忆库）：\n"
+
+
+def _escape_like(text: str) -> str:
+    """把 LIKE 的通配符转义成字面：`%`/`_`/`\\` 必须当普通字符。"""
+    return (text.replace('\\', '\\\\')
+                .replace('%', '\\%')
+                .replace('_', '\\_'))
+
+
+def _date_clause(alias: str, since: Optional[str], until: Optional[str]):
+    """日期闭区间 SQL 片段（对 diary_date 优先、缺失时回退 created_at）。"""
+    expr = f"COALESCE({alias}.diary_date, {alias}.created_at)"
+    sql, params = '', []
+    if since:
+        sql += f" AND {expr} >= ?"
+        params.append(since)
+    if until:
+        sql += f" AND {expr} <= ?"
+        params.append(until)
+    return sql, params
+
+
+def _open_readonly_ready(db_path: str) -> sqlite3.Connection:
+    """打开库并把 schema 补齐（旧库可能缺表），返回带 row_factory 的连接。"""
+    from scripts.schema import init_db
+    init_db(db_path).close()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def timeline_recall(db_path: str, k: int = 5, since: str = None,
+                    until: str = None) -> list[dict]:
+    """确定性时间轴：最近 k 篇日记，按 diary_date 倒序。
+
+    与联想召回的差别是**排序口径**（时间，不是相关度），但共用同一份结果 dict
+    与同一条注入管线（去重/预算/格式化），所以下游无需区分两条通道。
+
+    日记按 file 级聚合：一篇日记切成多块时只出现一次，正文按 chunk_index 拼回。
+    """
+    if not k or k <= 0:
+        return []
+    conn = _open_readonly_ready(db_path)
+    try:
+        clause, params = _date_clause('f', since, until)
+        files = conn.execute(
+            "SELECT f.id, COALESCE(f.diary_date, f.created_at) AS date, f.file_path "
+            "FROM files f "
+            "WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id) "
+            + clause +
+            " ORDER BY date DESC, f.id DESC LIMIT ?",
+            (*params, k)).fetchall()
+        out = []
+        for f in files:
+            rows = conn.execute(
+                "SELECT id, content, importance FROM chunks "
+                "WHERE file_id = ? ORDER BY chunk_index ASC", (f['id'],)).fetchall()
+            if not rows:
+                continue
+            out.append({
+                'chunk_id': rows[0]['id'],
+                'content': '\n\n'.join(r['content'] for r in rows),
+                'date': f['date'],
+                'score': 1.0,          # 时间轴不产出相关度；保留字段以统一下游
+                'file_path': f['file_path'],
+                'importance': rows[0]['importance'] or 'medium',
+            })
+        return out
+    finally:
+        conn.close()
+
+
+def literal_recall(db_path: str, text: str, k: int = 10, since: str = None,
+                   until: str = None) -> list[dict]:
+    """确定性字面命中：正文包含该词的 chunk（file 级聚合，命中块按序拼接）。
+
+    存在的唯一理由：回答"有没有提过 X 这个词"，而这是向量检索答不准的问题。
+    通配符按字面处理（`%` 不会被当成"全部"），否则这个通道比 grep 还危险。
+    """
+    text = (text or '').strip()
+    if not text or not k or k <= 0:
+        return []
+    pattern = '%' + _escape_like(text) + '%'
+    conn = _open_readonly_ready(db_path)
+    try:
+        clause, params = _date_clause('f', since, until)
+        rows = conn.execute(
+            "SELECT c.id, c.file_id, c.chunk_index, c.content, c.importance, "
+            "COALESCE(f.diary_date, f.created_at) AS date, f.file_path "
+            "FROM chunks c JOIN files f ON c.file_id = f.id "
+            "WHERE lower(c.content) LIKE lower(?) ESCAPE '\\' " + clause +
+            " ORDER BY date DESC, c.file_id DESC, c.chunk_index ASC",
+            (pattern, *params)).fetchall()
+        grouped, order = {}, []
+        for r in rows:
+            fid = r['file_id']
+            if fid not in grouped:
+                grouped[fid] = {
+                    'chunk_id': r['id'],
+                    'content': r['content'],
+                    'date': r['date'],
+                    'score': 1.0,
+                    'file_path': r['file_path'],
+                    'importance': r['importance'] or 'medium',
+                }
+                order.append(fid)
+            else:
+                grouped[fid]['content'] += '\n\n' + r['content']
+        return [grouped[fid] for fid in order[:k]]
+    finally:
+        conn.close()
 
 
 def mmr_rerank(candidates: list[dict], query_vec: list[float],
@@ -646,6 +767,10 @@ def main(argv=None) -> int:
     prefilter = False
     reward = False
     audit = None
+    timeline = None
+    literal = None
+    since = None
+    until = None
 
     i = 0
     while i < len(argv):
@@ -655,6 +780,18 @@ def main(argv=None) -> int:
             i += 2
         elif arg == '--k' and i + 1 < len(argv):
             k = int(argv[i + 1])
+            i += 2
+        elif arg == '--timeline' and i + 1 < len(argv):
+            timeline = int(argv[i + 1])
+            i += 2
+        elif arg == '--literal' and i + 1 < len(argv):
+            literal = argv[i + 1]
+            i += 2
+        elif arg == '--since' and i + 1 < len(argv):
+            since = argv[i + 1]
+            i += 2
+        elif arg == '--until' and i + 1 < len(argv):
+            until = argv[i + 1]
             i += 2
         elif arg == '--audit':
             # 可选值：`--audit 5` 看最近 5 条，`--audit` 用默认条数
@@ -700,6 +837,34 @@ def main(argv=None) -> int:
         ensure_agent(agent, description=register)
         print(f"[开户] 已为智能体「{agent}」建立记忆区并登记身份。")
         return 0
+
+    # 确定性通道：时间轴 / 字面命中。库内直查，不需要 embedding（无模型也能答）。
+    # 强制显式身份：这两条通道回答的是"我的记忆"，静默落到 env/default 库会串号。
+    if timeline is not None or literal is not None:
+        if not agent:
+            print("Usage: --timeline/--literal 必须显式指定 --identity/--agent"
+                  "（不允许静默落到 env/default 库）", file=sys.stderr)
+            return 2
+        ensure_agent(agent)
+        db_file = db_path or get_db_path(agent)
+        if literal is not None:
+            results = literal_recall(db_file, literal, k=k, since=since, until=until)
+            channel, header, q = 'literal', LITERAL_HEADER, literal
+        else:
+            results = timeline_recall(db_file, k=timeline, since=since, until=until)
+            channel, header = 'timeline', TIMELINE_HEADER
+            q = f'最近 {timeline} 篇' + (f' since={since}' if since else '') \
+                + (f' until={until}' if until else '')
+        results = dedupe_results(fit_to_budget(results, budget))
+        print(format_recall_output(results, header=header))
+        _ledger_append(agent, channel, q, results,
+                       {'since': since, 'until': until, 'k': k})
+        return 0
+
+    if since or until:
+        print("Usage: --since/--until 只能与 --timeline 或 --literal 一起用",
+              file=sys.stderr)
+        return 2
 
     # --audit：只读留痕，不召回、不需要 embedding（审计要在任何环境下都能跑）
     if audit is not None:
