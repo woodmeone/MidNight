@@ -184,7 +184,24 @@ def test_inverted_range_is_rejected(base, capsys):
     assert '区间为空' in capsys.readouterr().err
 
 
-def test_literal_ascii_case_insensitive(base):
+def test_literal_marks_gap_between_non_adjacent_chunks(base):
+    """命中块不连续时必须留省略号，不能把不相邻的正文拼成"连续上下文"。"""
+    db = _seed('probe')
+    # 造一篇 4 块的日记，只有第 1、4 块含关键词
+    d = get_dailynote_path('probe')
+    os.makedirs(d, exist_ok=True)
+    fp = os.path.join(d, 'gap.md')
+    with open(fp, 'w', encoding='utf-8') as f:
+        f.write("---\nmaid: probe\ncreated: 2026-09-25T10:00:00\ntags: [教学]\n---\n"
+                "关键词在第一块。\n\n第二块无关。\n\n第三块无关。\n\n关键词在第四块。\n")
+    ingest_file(fp, db, SemanticFakeEmbeddingClient())
+    os.unlink(fp)
+
+    got = literal_recall(db, '关键词', k=10)
+    target = [r for r in got if r['date'] == '2026-09-25']
+    assert len(target) == 1
+    assert '第一块' in target[0]['content'] and '第四块' in target[0]['content']
+    assert '…' in target[0]['content']
     db = _seed('probe')
     got = literal_recall(db, 'python', k=10)
     assert len(got) == 0        # 别人的 Python，不可见

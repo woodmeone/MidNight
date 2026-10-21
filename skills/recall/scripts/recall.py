@@ -448,10 +448,16 @@ def literal_recall(db_path: str, text: str, k: int = 10, since: str = None,
                     'score': 1.0,
                     'file_path': r['file_path'],
                     'importance': r['importance'] or 'medium',
+                    'chunk_indexes': [r['chunk_index']],
                 }
                 order.append(fid)
             else:
-                grouped[fid]['content'] += '\n\n' + r['content']
+                # 命中的块可能不连续（1、5 命中，2–4 没命中）。中间用省略号隔开，
+                # 否则读者会把两段不相邻的正文当成连续上下文——拼得好看但骗人。
+                last = grouped[fid]['chunk_indexes'][-1]
+                sep = '\n\n' if r['chunk_index'] == last + 1 else '\n\n…\n\n'
+                grouped[fid]['content'] += sep + r['content']
+                grouped[fid]['chunk_indexes'].append(r['chunk_index'])
         return [grouped[fid] for fid in order[:k]]
     finally:
         conn.close()
