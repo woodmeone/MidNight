@@ -183,3 +183,47 @@ def test_cli_audit_without_ledger_does_not_crash(base, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert '暂无' in out
+
+
+# ============================================================
+# 7. prep.py 也必须留痕（它是 SKILL.md 推荐的默认入口）
+# ============================================================
+
+def test_cli_prep_writes_ledger(base, capsys):
+    import scripts.prep as prep_mod
+    embed = SemanticFakeEmbeddingClient()
+    _seed('probe', '带教老师刘晓平，专业课权威', embed)
+
+    rc = prep_mod.main(['--message', '还记得刘晓平吗', '--identity', 'probe',
+                        '--force', '--k', '3'])
+    assert rc == 0
+
+    entries = read_entries('probe')
+    assert len(entries) == 1
+    assert entries[0]['channel'] == 'associative'
+    assert entries[0]['agent'] == 'probe'
+    assert entries[0]['extra']['entry'] == 'prep'
+
+
+def test_cli_prep_gated_out_does_not_write_ledger(base, capsys):
+    """门控挡下的短寒暄不是一次检索，不该污染审计。"""
+    import scripts.prep as prep_mod
+    _seed('probe', '随便一条记忆', SemanticFakeEmbeddingClient())
+
+    rc = prep_mod.main(['--message', '嗯', '--identity', 'probe'])
+    assert rc == 0
+    assert read_entries('probe') == []
+
+
+def test_prep_ledger_failure_does_not_break_recall(base, monkeypatch, capsys):
+    import scripts.prep as prep_mod
+    embed = SemanticFakeEmbeddingClient()
+    _seed('probe', '带教老师刘晓平，专业课权威', embed)
+
+    def _boom(*a, **k):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(prep_mod, 'ledger_append', _boom)
+    assert prep_mod.main(['--message', '还记得刘晓平吗', '--identity', 'probe',
+                          '--force']) == 0
+    assert '刘晓平' in capsys.readouterr().out

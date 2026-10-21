@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可
 
 from embedding import load_embedding_client  # noqa: E402
 from scripts.config import get_db_path, ensure_agent  # noqa: E402
+from scripts.ledger import append_entry as ledger_append  # noqa: E402
 from scripts.recall import (  # noqa: E402
     recall_associative, dedupe_results, fit_to_budget, format_recall_output,
 )
@@ -174,6 +175,18 @@ def main(argv=None) -> int:
                          now=time.time(), cooldown_seconds=cooldown)
     if out['recalled'] and out['text']:
         print(out['text'])
+
+    # 留痕：prep.py 是 SKILL.md 推荐的**默认入口**，它不记就谈不上"每次检索都留痕"。
+    # 门控挡下（recalled=False）时不记——那不是一次检索，记了会把审计噪音化。
+    # 与 recall.py 一致：只写 CLI 层，prep_for_reply 库函数保持纯净不碰磁盘。
+    if out['recalled']:
+        try:
+            ledger_append('associative', (query or '').strip() or message,
+                          out.get('results'), agent=identity,
+                          extra={'entry': 'prep', 'multi_scale': multi_scale,
+                                 'mmr': mmr, 'budget': budget, 'k': k})
+        except Exception:      # noqa: BLE001 — 留痕是旁路，绝不影响检索
+            pass
     return 0
 
 
