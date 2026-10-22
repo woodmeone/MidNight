@@ -186,9 +186,12 @@ python recall.py --literal "中立不追究" --identity qinglan
 ```bash
 python recall.py --audit 10 --identity qinglan
 # → 2026-10-21T16:47:05  channel=timeline  hits=3  query='最近 3 篇'  ids=770,726,796
+# → 2026-10-22T15:44:31  channel=associative  hits=1  query='备课 教案'  window=[2026-10-01, …]  ids=760
 ```
 
-两条确定性通道都**必须显式带 `--identity/--agent`**（缺了直接退出码 2），因为它们回答的是"我的记忆"，静默落到 env/default 库会串号。
+带时间窗的检索会在审计行显示 `window=[起, 止]`——窗内只命中 1 条是正确答案，但要让审计者看得见窗口，才不会误判"检索坏了"。
+
+`--timeline` / `--literal`（约束的退化形态）都**必须显式带 `--identity/--agent`**（缺了直接退出码 2），因为它们回答的是"我的记忆"，静默落到 env/default 库会串号。
 
 **边界（别用错）**：`--literal` 只匹配**正文**，不匹配 frontmatter 的 `tags`——"正文里真的出现过这个词"和"这条记忆被打了这个标签"是两件事。想知道"标签层面有没有关联"，走联想通道（标签共现网就是干这个的）。
 

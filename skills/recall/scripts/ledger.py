@@ -115,16 +115,26 @@ def read_entries(agent: str = None, limit: int = DEFAULT_AUDIT_LIMIT) -> list[di
 
 
 def format_entries(entries: list[dict], agent: str = None) -> str:
-    """把留痕格式化成一行人可读的审计文本。"""
+    """把留痕格式化成一行人可读的审计文本。
+
+    时间窗（`extra.since/until`）要**显示**出来：审计者看到 hits=1 时，
+    第一反应是"是不是坏了"——窗内只有 1 条是正确答案，但得让他看得见窗口。
+    """
     if not entries:
         return "[检索留痕] 暂无记录。"
     who = agent or os.environ.get('MIDNIGHT_AGENT') or DEFAULT_AGENT
     lines = [f"[检索留痕] agent={who} 最近 {len(entries)} 条："]
     for e in entries:
         ids = ','.join(str(i) for i in (e.get('chunk_ids') or []))
+        extra = e.get('extra') or {}
+        since, until = extra.get('since'), extra.get('until')
+        window = ''
+        if since or until:
+            window = f"  window=[{since or '…'}, {until or '…'}]"
         lines.append(
             f"{e.get('ts', '?')}  channel={e.get('channel', '?')}  "
             f"hits={e.get('hits', 0)}  query={e.get('query', '')!r}"
+            + window
             + (f"  ids={ids}" if ids else "")
         )
     return "\n".join(lines)

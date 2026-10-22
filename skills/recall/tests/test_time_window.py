@@ -283,3 +283,23 @@ def test_window_flag_does_not_swallow_next_flag(db, capsys, which):
     err = capsys.readouterr().err
     # 必须指向 --since 缺值，而不是把锅甩给后面的参数
     assert '--since 缺少值' in err, err
+
+
+def test_audit_displays_window(db, capsys):
+    """审计行必须显示窗口：hits=1 在窗内是正确答案，但看不见窗口就会像坏了。"""
+    from scripts.recall import format_entries
+    from scripts.ledger import read_entries
+    assert recall_main(['--query', '备课', '--identity', 'probe',
+                        '--since', '2026-10-01', '--until', '2026-10-31']) == 0
+    capsys.readouterr()
+    text = format_entries(read_entries('probe'), 'probe')
+    assert 'window=[2026-10-01, 2026-10-31]' in text
+
+
+def test_audit_without_window_shows_no_window_field(db, capsys):
+    from scripts.recall import format_entries
+    from scripts.ledger import read_entries
+    assert recall_main(['--query', '备课', '--identity', 'probe']) == 0
+    capsys.readouterr()
+    text = format_entries(read_entries('probe'), 'probe')
+    assert 'window=' not in text
