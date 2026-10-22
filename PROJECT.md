@@ -21,7 +21,7 @@ recall 内部模块分工：
 | 文件 | 职责 |
 |---|---|
 | `prep.py` | 可移植核心：门控→取 query→召回→去重→MMR→预算→格式化文本；薄 CLI |
-| `recall.py` | 向量 KNN + 标签脉冲合并 + 时间加权 + tag-first 扩增 + `mmr_rerank` + 反馈强化 `feedback_reward`；确定性通道 `timeline_recall` / `literal_recall`（库内直查，不碰 md） |
+| `recall.py` | 联想主干：向量 KNN + 标签脉冲合并 + 时间加权 + tag-first 扩增 + `mmr_rerank` + 反馈强化 `feedback_reward`；**约束**：时间窗（`since`/`until`，压候选池 + 标签扩增 + 缓存键）、字面（`literal_recall`）；退化形态 `timeline_recall`（库内直查，不碰 md） |
 | `ledger.py` | 检索留痕：`append_entry` / `read_entries` / `format_entries`，写失败静默（旁路），一 agent 一 `retrieval_ledger.jsonl` |
 | `tag_network.py` | 标签方向边 + 脉冲传播（压缩/枢纽降温/Core-Ghost 门控/多尺度线索提取） |
 | `embedding.py` | 嵌入客户端三后端：本地 bge-m3 ONNX / SiliconFlow API / Fake（离线兜底），三级模型自动解析 |
@@ -35,7 +35,7 @@ recall 内部模块分工：
 1. **写日记**：Agent 按写日记协议（一事一记、时间取真、tags 进 frontmatter）写 md 到 `~/.midnight/recall/<agent>/dailynote/` → `ingest.py` 切块、向量化、写入 SQLite，同文件标签建方向边（tag_edges）与共现（tag_cooccurrence）。
 2. **回复前召回**：`prep.py --message "用户原话" --identity <名字>` → 门控（触发词必召回/寒暄跳过/冷却可注入时钟）→ 取 query（AI 语义优先，缺省用原话）→ `recall_associative`（向量 KNN + 标签脉冲 + 时间加权 + tag-first 有界扩增）→ 去重 → 可选 MMR 重排 → 预算收条（完整注入不截半句）→ 输出 `[回忆]` 文本块 + 结构化 results。
 3. **身份隔离**：显式 `--identity/--agent` = 确定性查自己区（声明即自动开户）；`--auto` 仅兜底，非 default 需词面锚定 ≥2 字才可选，防跨区泄漏。
-4. **检索通道选择**（ADR-0002）：语义召回走联想通道；"最新一条/记到哪天/有没有提过某词"走确定性通道（`recall.py --timeline/--literal/--since/--until`，库内直查、不需要 embedding）；`dailynote/*.md` 只作 ingest 源，**永不作检索目标**，只有用户显式授权才可读原文。每次 CLI 检索追加一行留痕，`--audit` 反查。
+4. **检索 = 一条主干 + 两个约束**（ADR-0003，修订 ADR-0002 的"三通道"表述）：主干是联想排序（向量 KNN + 标签脉冲 + 时间加权 + tag-first 扩增）；约束是**时间窗**（`--since/--until`，闭区间，压在候选池与标签扩增两处，且参与缓存键）与**字面**（`--literal`，`LIKE` 转义）。约束在候选池阶段过滤，主干在其内排序——"十月以后关于备课的"一次调用即可。`--timeline` 是约束的退化形态（只要时间顺序、不要语义排序）。`dailynote/*.md` 只作 ingest 源，**永不作检索目标**，只有用户显式授权才可读原文。每次 CLI 检索追加一行留痕（含窗口），`--audit` 反查。
 5. **自我模型**：`self_model.py --init` 首建 self 锚；`evolution.py --apply` 只改可动层，定海锚字段拒绝；`--decay` 压冷边。
 
 ## 关键数据结构
@@ -45,7 +45,7 @@ recall 内部模块分工：
 - `recall.db`（SQLite）：`files`（日记源）、`chunks`（切块 + vector BLOB + importance + access_count）、`tags`（+vector）、`chunk_tags`、`tag_cooccurrence`（无向共现）、`tag_edges`（方向边，脉冲传播底座）、`chunk_ngrams`（倒排预筛）、`meta`、`recall_cache`
 - `agent.json`：身份（description + keywords，list_agents 依据）
 - `dailynote/`：日记 md 源文件（真相源，永不删；**不是检索索引**，见 ADR-0002）
-- `retrieval_ledger.jsonl`：检索留痕（一行一次检索：ts/agent/channel/query/hits/chunk_ids），`--audit` 读取
+- `retrieval_ledger.jsonl`：检索留痕（一行一次检索：ts/agent/channel/query/hits/chunk_ids/extra，extra 含 `since`/`until`），`--audit` 读取
 - `self.md`：自我锚（frontmatter 含 read_only 定海锚）
 
 ## 必须遵守的约束
@@ -60,11 +60,11 @@ recall 内部模块分工：
 
 ## 当前支持功能（一行清单）
 
-- recall：日记入库 / 联想召回（脉冲传播+枢纽降温+Core-Ghost+多尺度+MMR）/ 确定性通道（时间轴+字面命中+日期区间）/ 检索留痕与 `--audit` 审计 / 身份隔离与 auto 兜底 / 检索反馈强化 / 倒排预筛与结果缓存 / 本地 ONNX 真向量化与非破坏重嵌入 / self 锚与自进化 / 孤儿数据迁移 / 首轮上下文轻编译
+- recall：日记入库 / 联想主干（脉冲传播+枢纽降温+Core-Ghost+多尺度+MMR）/ 约束（时间窗+字面）/ 时间轴退化形态 / 检索留痕与 `--audit` 审计 / 身份隔离与 auto 兜底 / 检索反馈强化 / 倒排预筛与结果缓存 / 本地 ONNX 真向量化与非破坏重嵌入 / self 锚与自进化 / 孤儿数据迁移 / 首轮上下文轻编译
 - core：跨端事实时间线 append / merge（时间戳 + 去重）
 - pulse：`[[Pulse::*]]` 心跳协议自主续命
 - compass：语义模型路由 + 主模型容灾降级
 
 ## 演进方向
 
-不设独立进度文件：意图与验收住 Issue（`.scratch/` + GitHub），合入即真相更新。当前开放中的是 Issue #2（PR #1，`feature/v2-self-object-memory`）：可移植召回核心，四票已全部交付。
+不设独立进度文件：意图与验收住 Issue（`.scratch/` + GitHub），合入即真相更新。开放中的工作以 `gh issue list` 为准，本文档不维护进度快照（历史快照必然过期，见不变量 1）。

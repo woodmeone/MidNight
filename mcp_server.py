@@ -60,8 +60,8 @@ async def recall_ingest(agent: str = "default", diary_dir: str = "") -> str:
 
 @server.tool(
     name="recall_search",
-    title="联想式记忆召回",
-    description="根据当前话题召回相关记忆，支持联想（共现脉冲传播）、时间加权、多智能体隔离。返回可注入上下文的记忆片段。",
+    title="联想式记忆召回（主干 + 时间窗约束）",
+    description="根据当前话题召回相关记忆，支持联想（共现脉冲传播）、时间加权、多智能体隔离。since/until（YYYY-MM-DD，闭区间）是时间窗约束：先按日期筛记忆、再在窗内做语义排序，回答「十月以后关于备课的」这类时间×语义问题。返回可注入上下文的记忆片段。",
 )
 async def recall_search(
     query: str,
@@ -70,9 +70,15 @@ async def recall_search(
     tag_weight: float = 0.3,
     time_ratio: float = 0.2,
     truncate: float = 1.0,
+    since: str = "",
+    until: str = "",
 ) -> str:
-    """在指定 agent 的记忆库中做联想召回。"""
+    """在指定 agent 的记忆库中做联想召回，可带时间窗约束。"""
     args = ["--query", query, "--agent", agent, "--k", str(k)]
+    if since:
+        args += ["--since", since]
+    if until:
+        args += ["--until", until]
     return _run_py("recall", "recall.py", args)
 
 

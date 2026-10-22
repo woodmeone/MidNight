@@ -23,6 +23,7 @@ from scripts.config import get_db_path, ensure_agent  # noqa: E402
 from scripts.ledger import append_entry as ledger_append  # noqa: E402
 from scripts.recall import (  # noqa: E402
     recall_associative, dedupe_results, fit_to_budget, format_recall_output,
+    normalize_date, take_value, take_int, take_float,
 )
 
 # 命中即必召回的意图触发词（对齐 SKILL.md「触发条件」表）。
@@ -72,11 +73,15 @@ def prep_for_reply(user_msg: str, db_path: str = None, identity: str = None,
                    now: float = None, last_recall_ts: float = None,
                    cooldown_seconds: float = DEFAULT_COOLDOWN,
                    min_len: int = DEFAULT_MIN_LEN,
-                   trigger_words=DEFAULT_TRIGGER_WORDS) -> dict:
+                   trigger_words=DEFAULT_TRIGGER_WORDS,
+                   since: str = None, until: str = None) -> dict:
     """回复前记忆准备：门控→取 query→联想召回→去重→MMR→预算→格式化文本。
 
     A 左接口：`query` 是上层 AI 判断出的"要查什么语义"，显式给出则优先于用户原话
     （保留 AI 对语境的深层理解）；不给则回退用 `user_msg` 原文。
+
+    `since`/`until`（Issue #7）：**时间窗约束**，透传给联想主干——"十月以后关于
+    备课的"由此一次问出口。默认 None = 不设窗，逐位等于旧行为。
 
     返回 {recalled: bool, text: str, results: list[dict]}：
       - recalled=False（被门控挡下）→ text=""、results=[]；
@@ -104,10 +109,11 @@ def prep_for_reply(user_msg: str, db_path: str = None, identity: str = None,
         embedding_client = load_embedding_client(
             {'api_key': os.environ.get('SILICONFLOW_API_KEY', ''), 'dimension': 1024})
 
-    # 4. 联想召回（透传票2 多尺度 / 票3 MMR）
+    # 4. 联想召回（透传票2 多尺度 / 票3 MMR / Issue#7 时间窗约束）
     results = recall_associative(effective_query, db_path, embedding_client,
                                  k=k, tag_weight=tag_weight, time_ratio=time_ratio,
-                                 multi_scale=multi_scale, mmr_lambda=mmr_lambda)
+                                 multi_scale=multi_scale, mmr_lambda=mmr_lambda,
+                                 since=since, until=until)
 
     # 5. 去重 → 预算收敛（顺序：先去重再收预算，避免重复条目白占预算）
     results = dedupe_results(results)
@@ -135,44 +141,68 @@ def main(argv=None) -> int:
     multi_scale = False
     mmr = None
     cooldown = DEFAULT_COOLDOWN
+    since = None
+    until = None
 
     i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == '--message' and i + 1 < len(argv):
-            message = argv[i + 1]; i += 2
-        elif arg == '--query' and i + 1 < len(argv):
-            query = argv[i + 1]; i += 2
-        elif arg in ('--identity', '--agent') and i + 1 < len(argv):
-            identity = argv[i + 1]; i += 2
-        elif arg == '--db' and i + 1 < len(argv):
-            db_path = argv[i + 1]; i += 2
-        elif arg == '--budget' and i + 1 < len(argv):
-            budget = int(argv[i + 1]); i += 2
-        elif arg == '--k' and i + 1 < len(argv):
-            k = int(argv[i + 1]); i += 2
-        elif arg == '--mmr' and i + 1 < len(argv):
-            mmr = float(argv[i + 1]); i += 2
-        elif arg == '--cooldown' and i + 1 < len(argv):
-            cooldown = float(argv[i + 1]); i += 2
-        elif arg == '--force':
-            force = True; i += 1
-        elif arg == '--multi-scale':
-            multi_scale = True; i += 1
-        else:
-            print(f"Unknown option: {arg}", file=sys.stderr)
-            return 2
+    try:
+        while i < len(argv):
+            arg = argv[i]
+            if arg == '--message' and i + 1 < len(argv):
+                message = argv[i + 1]; i += 2
+            elif arg == '--query' and i + 1 < len(argv):
+                query = argv[i + 1]; i += 2
+            elif arg in ('--identity', '--agent') and i + 1 < len(argv):
+                identity = argv[i + 1]; i += 2
+            elif arg == '--db' and i + 1 < len(argv):
+                db_path = argv[i + 1]; i += 2
+            elif arg == '--budget':
+                budget = take_int(argv, i, '--budget'); i += 2
+            elif arg == '--k':
+                k = take_int(argv, i, '--k'); i += 2
+            elif arg == '--mmr':
+                mmr = take_float(argv, i, '--mmr'); i += 2
+            elif arg == '--cooldown':
+                cooldown = take_float(argv, i, '--cooldown'); i += 2
+            elif arg == '--since':
+                since = take_value(argv, i, '--since'); i += 2
+            elif arg == '--until':
+                until = take_value(argv, i, '--until'); i += 2
+            elif arg == '--force':
+                force = True; i += 1
+            elif arg == '--multi-scale':
+                multi_scale = True; i += 1
+            else:
+                print(f"Unknown option: {arg}", file=sys.stderr)
+                return 2
+    except ValueError as exc:
+        print(f"Usage: {exc}", file=sys.stderr)
+        return 2
 
     if not message:
         print("Usage: prep.py --message '...' [--identity NAME] [--query '...'] "
-              "[--budget N] [--k N] [--force] [--multi-scale] [--mmr 0.5]",
+              "[--budget N] [--k N] [--force] [--multi-scale] [--mmr 0.5] "
+              "[--since YYYY-MM-DD] [--until YYYY-MM-DD]",
               file=sys.stderr)
         return 1
+
+    # 日期校验与 recall.py 同口径：非法格式直接报错，不静默返空。
+    try:
+        since = normalize_date(since, '--since')
+        until = normalize_date(until, '--until')
+    except ValueError as exc:
+        print(f"Usage: {exc}", file=sys.stderr)
+        return 2
+    if since and until and since > until:
+        print(f"Usage: --since ({since}) 晚于 --until ({until})，区间为空",
+              file=sys.stderr)
+        return 2
 
     out = prep_for_reply(message, db_path=db_path, identity=identity,
                          query=query, force=force, budget_chars=budget, k=k,
                          multi_scale=multi_scale, mmr_lambda=mmr,
-                         now=time.time(), cooldown_seconds=cooldown)
+                         now=time.time(), cooldown_seconds=cooldown,
+                         since=since, until=until)
     if out['recalled'] and out['text']:
         print(out['text'])
 
@@ -184,7 +214,8 @@ def main(argv=None) -> int:
             ledger_append('associative', (query or '').strip() or message,
                           out.get('results'), agent=identity,
                           extra={'entry': 'prep', 'multi_scale': multi_scale,
-                                 'mmr': mmr, 'budget': budget, 'k': k})
+                                 'mmr': mmr, 'budget': budget, 'k': k,
+                                 'since': since, 'until': until})
         except Exception:      # noqa: BLE001 — 留痕是旁路，绝不影响检索
             pass
     return 0

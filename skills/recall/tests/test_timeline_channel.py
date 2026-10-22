@@ -140,10 +140,17 @@ def test_timeline_zero_returns_empty(base):
     assert timeline_recall(db, k=0) == []
 
 
-def test_since_without_channel_is_rejected(base, capsys):
+def test_since_without_any_retrieval_is_rejected(base, capsys):
+    """Issue #7 后 --since/--until 是**约束**，不是通道。
+
+    单独出现时没有东西可约束（既没 --query 也没 --timeline/--literal），
+    必须报错而不是静默返回空——否则用户看到的是"我没记忆"。
+    """
     rc = recall_main(['--since', '2026-09-01', '--identity', 'probe'])
-    assert rc == 2
-    assert '--timeline' in capsys.readouterr().err
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert '--query' in err
+    assert '约束' in err
 
 
 def test_until_includes_whole_day_when_date_has_time_part(base):

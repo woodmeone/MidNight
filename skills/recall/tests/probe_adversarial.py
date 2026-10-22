@@ -108,6 +108,59 @@ def main():
             c.close()
             check('孤儿 chunk（file 不存在）', lambda: timeline_recall(orph, k=3))
             check('孤儿 chunk 字面', lambda: literal_recall(orph, '孤儿', k=3))
+
+            print('时间窗约束（Issue #7）：')
+            from scripts.recall import recall_associative
+            cli = SemanticFakeEmbeddingClient()
+            # 补三条跨月"备课"记忆：窗口探针要能观察到"确实收窄"
+            for name, created, body in [
+                ('w1', '2026-08-10', '备课：八月版本'),
+                ('w2', '2026-09-15', '备课：九月版本'),
+                ('w3', '2026-10-05', '备课：十月版本'),
+            ]:
+                fp2 = os.path.join(d, f'{name}.md')
+                with open(fp2, 'w', encoding='utf-8') as f:
+                    f.write(f"---\nmaid: p\ncreated: {created}T10:00:00\n"
+                            f"tags: [教学]\n---\n{body}\n")
+                ingest_file(fp2, db, cli)
+                os.unlink(fp2)
+
+            check('窗口 起点=终点',
+                  lambda: recall_associative('备课', db, cli, k=10,
+                                             since='2026-09-15', until='2026-09-15'))
+            check('窗口 只有 since',
+                  lambda: recall_associative('备课', db, cli, k=10, since='2026-09-15'))
+            check('窗口 只有 until',
+                  lambda: recall_associative('备课', db, cli, k=10, until='2026-09-15'))
+            check('窗口 空串（等价不设窗）',
+                  lambda: recall_associative('备课', db, cli, k=10, since='', until=''))
+            check('窗口 极早~极晚',
+                  lambda: recall_associative('备课', db, cli, k=10,
+                                             since='1900-01-01', until='2999-12-31'))
+            check('窗口 + prefilter',
+                  lambda: recall_associative('备课', db, cli, k=10, prefilter=True,
+                                             since='2026-09-15'))
+            check('窗口 + multi_scale',
+                  lambda: recall_associative('备课', db, cli, k=10, multi_scale=True,
+                                             since='2026-09-15'))
+            check('窗口 + MMR',
+                  lambda: recall_associative('备课', db, cli, k=10, mmr_lambda=0.5,
+                                             since='2026-09-15'))
+            check('窗口 + cache（连跑两次不脏读）',
+                  lambda: [recall_associative('备课', db, cli, k=10, cache=True,
+                                              since='2026-09-15') for _ in range(2)])
+
+            # 窗口必须真的收窄且选对内容——"没过滤"和"过滤坏了"都要抓到
+            unbounded = recall_associative('备课', db, cli, k=10)
+            windowed = recall_associative('备课', db, cli, k=10, since='2026-10-01')
+            if len(windowed) > len(unbounded):
+                raise AssertionError(
+                    f'窗口反而变宽了：{len(windowed)} > {len(unbounded)}')
+            dates = {r['date'] for r in windowed}
+            if not all(dt >= '2026-10-01' for dt in dates):
+                raise AssertionError(f'窗外记忆混进来了：{sorted(dates)}')
+            print(f'  PASS  窗口确实收窄（不设窗 {len(unbounded)} 条 ≥ 设窗 '
+                  f'{len(windowed)} 条，且全部 >= 2026-10-01）')
         finally:
             cfg.BASE_DIR = old
 

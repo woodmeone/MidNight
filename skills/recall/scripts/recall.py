@@ -77,12 +77,17 @@ def vector_candidate_ids(conn: sqlite3.Connection, query: str) -> Optional[set]:
 
 
 def recall(query: str, db_path: str, embedding_client, k: int = 10,
-           prefilter: bool = False) -> list[dict]:
+           prefilter: bool = False, since: Optional[str] = None,
+           until: Optional[str] = None) -> list[dict]:
     """Vector similarity search. Returns list of {chunk_id, content, date, score, file_path, importance}.
 
     `prefilter=True` 时先用倒排索引把向量扫描收窄到与查询有字面重叠的候选子集，
     降低随记忆量增长的 O(#chunks) 全量扫描。tag-first 语义不依赖本函数（词面
     不可见的关联内容走 tag 扩增），故 prefilter 只优化词面候选的精排过程。
+
+    `since`/`until`（Issue #7）：**时间窗约束**，闭区间，作用在候选池上——
+    先按日期把记忆筛成一段，再在段内做向量精排。约束不是排序，所以它必须发生在
+    打分之前：排完再筛会少返回（top-k 已被窗外记忆占满）甚至返回空。
     """
     # Ensure schema exists (open+close so Windows doesn't hold the file lock)
     from scripts.schema import init_db
@@ -110,13 +115,15 @@ def recall(query: str, db_path: str, embedding_client, k: int = 10,
             id_filter = f" AND c.id IN ({ph})"
             id_params = tuple(ids)
 
+        window_sql, window_params = _date_clause('f', since, until)
         rows = conn.execute("""
             SELECT c.id, c.content, c.file_id, COALESCE(f.diary_date, f.created_at) AS date,
                    f.file_path, c.importance, c.access_count
             FROM chunks c
             JOIN files f ON c.file_id = f.id
-            WHERE c.vector IS NOT NULL{filter}
-        """.format(filter=id_filter), id_params).fetchall()
+            WHERE c.vector IS NOT NULL{filter}{window}
+        """.format(filter=id_filter, window=window_sql),
+            (*id_params, *window_params)).fetchall()
 
         if cand is not None:
             ph = ','.join('?' * len(ids))
@@ -158,7 +165,9 @@ def recall(query: str, db_path: str, embedding_client, k: int = 10,
 def recall_by_identity(query: str, embedding_client, identity: str,
                        k: int = 10, tag_weight: float = 0.3,
                        time_ratio: float = 0.2, truncate: float = 1.0,
-                       prefilter: bool = False, cache: bool = False) -> list[dict]:
+                       prefilter: bool = False, cache: bool = False,
+                       since: Optional[str] = None,
+                       until: Optional[str] = None) -> list[dict]:
     """Identity-preferred recall: 上层会话显式声明了「我是谁」就查谁的记忆区。
 
     与 auto_recall 的关键差异：auto_recall 靠"查询文本 vs agent 描述"的语义相似度
@@ -177,14 +186,16 @@ def recall_by_identity(query: str, embedding_client, identity: str,
                                  k=k, tag_weight=tag_weight,
                                  time_ratio=time_ratio, truncate=truncate,
                                  prefilter=prefilter, cache=cache,
-                                 decay=0.5, max_depth=2, threshold=0.1)
+                                 decay=0.5, max_depth=2, threshold=0.1,
+                                 since=since, until=until)
     return results
 
 
 def auto_recall(query: str, embedding_client, k: int = 10,
                 tag_weight: float = 0.3, time_ratio: float = 0.2,
                 truncate: float = 1.0, prefilter: bool = False,
-                cache: bool = False) -> dict:
+                cache: bool = False, since: Optional[str] = None,
+                until: Optional[str] = None) -> dict:
     """Auto-route query to the best matching agent, then recall.
 
     Routing is anchored: a non-default agent must share ≥ ROUTE_ANCHOR_MIN_SHARED
@@ -235,7 +246,8 @@ def auto_recall(query: str, embedding_client, k: int = 10,
 
     results = recall_associative(query, db_path, embedding_client,
                                  k=k, tag_weight=tag_weight,
-                                 time_ratio=time_ratio, truncate=truncate)
+                                 time_ratio=time_ratio, truncate=truncate,
+                                 since=since, until=until)
     return {**best, 'ambiguous': ambiguous, 'results': results}
 
 
@@ -342,6 +354,48 @@ def _normalize_date(value: Optional[str], flag: str) -> Optional[str]:
     if not _DATE_RE.match(text):
         raise ValueError(f"{flag} 需要 YYYY-MM-DD 格式，收到 {value!r}")
     return text
+
+
+# 公开别名：prep.py 等调用方复用同一套日期口径，避免两处校验漂移。
+normalize_date = _normalize_date
+
+
+def take_value(argv, i: int, flag: str):
+    """取 flag 的值；下一个 token 是另一个 flag 时视为"缺值"（抛 ValueError）。
+
+    为什么必须显式拒绝：PowerShell 会把空字符串参数丢掉（`--since "" --budget 500`
+    到程序里变成 `--since --budget 500`），若照常吞值就会把 `--budget` 当日期、
+    `500` 报 Unknown option——**报错指向错误的参数**，用户按提示修了还修不好。
+    （#5 给 --literal 修过，#7 审查发现窗口参数漏了，一并收口。）
+    """
+    if i + 1 >= len(argv):
+        raise ValueError(f"{flag} 缺少值")
+    value = argv[i + 1]
+    if isinstance(value, str) and value.startswith('--'):
+        raise ValueError(f"{flag} 缺少值（下一个参数是 {value}）")
+    return value
+
+
+def take_int(argv, i: int, flag: str) -> int:
+    """取数值参数并转 int；缺值/非数字都给人话报错，不留裸 traceback。
+
+    `--timeline --identity X` 原来直接 `int('--identity')` 崩栈——
+    用户看到的是 Python 堆栈，不是"参数写错了"。
+    """
+    raw = take_value(argv, i, flag)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{flag} 需要整数，收到 {raw!r}") from None
+
+
+def take_float(argv, i: int, flag: str) -> float:
+    """取数值参数并转 float；同上，给人话报错。"""
+    raw = take_value(argv, i, flag)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{flag} 需要数字，收到 {raw!r}") from None
 
 
 def _escape_like(text: str) -> str:
@@ -549,7 +603,9 @@ def _time_score(date_str: str) -> float:
 
 
 def expand_tag_candidates(conn, activated, strength_map, seen, tag_weight,
-                          time_ratio, time_score_fn, cap=TAG_CANDIDATE_CAP) -> list[dict]:
+                          time_ratio, time_score_fn, cap=TAG_CANDIDATE_CAP,
+                          since: Optional[str] = None,
+                          until: Optional[str] = None) -> list[dict]:
     """**tag-first 有界候选扩增**：标签承载的内容以标签出现与否来入候选，而非词面重叠。
 
     这是对 VCP「tag-gate / 向量重塑」思想在本地引擎的落地：一个 chunk 是否值得被
@@ -563,8 +619,12 @@ def expand_tag_candidates(conn, activated, strength_map, seen, tag_weight,
 
     注意：本函数**不修改传入 seen 之外的状态**，只把入选的 chunk_id 追加到 seen
     以去重（沿用调用方传的 seen 引用）。
+
+    `since`/`until`（Issue #7）：时间窗必须在**取元数据这一跳**就压上去。
+    若只在向量层过滤，携带激活标签的窗外记忆会从这里被扩增回来——窗口就成了摆设。
     """
     # tag-first 门控：任何携带「激活标签」的 chunk 都先进入候选视野
+    window_sql, window_params = _date_clause('f', since, until)
     candidates: dict[int, list[int]] = {}
     for tid, s in activated:
         if s <= 0:
@@ -585,8 +645,8 @@ def expand_tag_candidates(conn, activated, strength_map, seen, tag_weight,
                    COALESCE(f.diary_date, f.created_at) AS date,
                    f.file_path, c.importance, c.access_count
             FROM chunks c JOIN files f ON c.file_id = f.id
-            WHERE c.id = ?
-        """, (cid,)).fetchone()
+            WHERE c.id = ?""" + window_sql + """
+        """, (cid, *window_params)).fetchone()
         if not meta:
             continue
         scored.append((tag_strength, cid, meta))
@@ -674,7 +734,9 @@ def recall_associative(query: str, db_path: str, embedding_client,
                        cache: bool = False, expand_neighbors: bool = False,
                        neighbor_cap: int = 0, depth_decay: float = 1.0,
                        multi_scale: bool = False,
-                       mmr_lambda: Optional[float] = None) -> list[dict]:
+                       mmr_lambda: Optional[float] = None,
+                       since: Optional[str] = None,
+                       until: Optional[str] = None) -> list[dict]:
     """Associative recall: combine vector KNN results with tag pulse propagation
     and optional time weighting, truncation, and importance boosting.
 
@@ -685,6 +747,10 @@ def recall_associative(query: str, db_path: str, embedding_client,
     `multi_scale=True`（票2）：把 query 拆成整句+片段多粒度，各自感应标签种子后
     取最大相似合并激活，让藏在句子角落的细线索也能成为 core 种子。默认关闭，
     关闭时逐位等于旧行为。
+
+    `since`/`until`（Issue #7）：**时间窗约束**，闭区间。它同时压在两处——
+    向量候选池（`recall` 的 SQL）与**标签扩增**（`expand_tag_candidates`）。
+    两处都压才算约束：只压向量层，窗外记忆会从标签后门溜回来，窗口形同虚设。
     """
     from tag_network import activate_tags, multi_scale_queries
 
@@ -694,7 +760,8 @@ def recall_associative(query: str, db_path: str, embedding_client,
                          time_ratio=time_ratio, truncate=truncate, prefilter=prefilter,
                          expand_neighbors=expand_neighbors, neighbor_cap=neighbor_cap,
                          depth_decay=depth_decay, multi_scale=multi_scale,
-                         mmr_lambda=mmr_lambda)
+                         mmr_lambda=mmr_lambda,
+                         since=since, until=until)
         hit = cache_get(db_path, key)
         if hit is not None:
             return hit
@@ -702,7 +769,7 @@ def recall_associative(query: str, db_path: str, embedding_client,
     fetch_k = max(k, int(k / max(truncate, 0.01))) if truncate < 1.0 else k
     final_k = max(1, int(k * truncate)) if truncate < 1.0 else k
     vector_results = recall(query, db_path, embedding_client, k=fetch_k,
-                            prefilter=prefilter)
+                            prefilter=prefilter, since=since, until=until)
     if not vector_results:
         return []
 
@@ -757,7 +824,8 @@ def recall_associative(query: str, db_path: str, embedding_client,
             if tag_weight > 0:
                 boosted.extend(expand_tag_candidates(
                     conn, activated, strength_map, seen, tag_weight, time_ratio,
-                    _time_score, cap=TAG_CANDIDATE_CAP))
+                    _time_score, cap=TAG_CANDIDATE_CAP,
+                    since=since, until=until))
 
             boosted.sort(key=lambda x: x['score'], reverse=True)
             pool = boosted
@@ -794,21 +862,6 @@ def _ledger_append(agent, channel: str, query: str, results, extra: dict = None)
         return False
 
 
-def _take_value(argv, i: int, flag: str):
-    """取 flag 的值；下一个 token 是另一个 flag 时视为"缺值"。
-
-    为什么必须显式拒绝：PowerShell 会把空字符串参数丢掉（`--literal "" --identity X`
-    到程序里变成 `--literal --identity X`），若照常吞值就会把 `--identity` 当成搜索词，
-    用户看到的是"查不到记忆"而不是"参数写错了"——静默失败比报错危险得多。
-    """
-    if i + 1 >= len(argv):
-        raise ValueError(f"{flag} 缺少值")
-    value = argv[i + 1]
-    if isinstance(value, str) and value.startswith('--'):
-        raise ValueError(f"{flag} 缺少值（下一个参数是 {value}）")
-    return value
-
-
 def main(argv=None) -> int:
     """CLI: python recall.py --query '...' [--auto] [--k N] [--agent NAME]
     [--db PATH] [--key KEY] [--prefilter]
@@ -831,66 +884,52 @@ def main(argv=None) -> int:
     since = None
     until = None
 
+    # 参数解析统一收口：take_* 抛 ValueError → 一次捕获、人话报错、退出码 2。
+    # （逐 flag try 是重复；裸 int() 是 traceback。两者都是"报错不指参数"。）
     i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == '--query' and i + 1 < len(argv):
-            query = argv[i + 1]
-            i += 2
-        elif arg == '--k' and i + 1 < len(argv):
-            k = int(argv[i + 1])
-            i += 2
-        elif arg == '--timeline' and i + 1 < len(argv):
-            timeline = int(argv[i + 1])
-            i += 2
-        elif arg == '--literal':
-            try:
-                literal = _take_value(argv, i, '--literal')
-            except ValueError as exc:
-                print(f"Usage: {exc}", file=sys.stderr)
-                return 2
-            i += 2
-        elif arg == '--since' and i + 1 < len(argv):
-            since = argv[i + 1]
-            i += 2
-        elif arg == '--until' and i + 1 < len(argv):
-            until = argv[i + 1]
-            i += 2
-        elif arg == '--audit':
-            # 可选值：`--audit 5` 看最近 5 条，`--audit` 用默认条数
-            if i + 1 < len(argv) and argv[i + 1].isdigit():
-                audit = int(argv[i + 1])
-                i += 2
+    try:
+        while i < len(argv):
+            arg = argv[i]
+            if arg == '--query' and i + 1 < len(argv):
+                query = argv[i + 1]; i += 2
+            elif arg == '--k':
+                k = take_int(argv, i, '--k'); i += 2
+            elif arg == '--timeline':
+                timeline = take_int(argv, i, '--timeline'); i += 2
+            elif arg == '--literal':
+                literal = take_value(argv, i, '--literal'); i += 2
+            elif arg == '--since':
+                since = take_value(argv, i, '--since'); i += 2
+            elif arg == '--until':
+                until = take_value(argv, i, '--until'); i += 2
+            elif arg == '--audit':
+                # 可选值：`--audit 5` 看最近 5 条，`--audit` 用默认条数
+                if i + 1 < len(argv) and argv[i + 1].isdigit():
+                    audit = int(argv[i + 1]); i += 2
+                else:
+                    audit = DEFAULT_AUDIT_LIMIT; i += 1
+            elif arg == '--auto':
+                auto = True; i += 1
+            elif arg == '--prefilter':
+                prefilter = True; i += 1
+            elif arg == '--reward':
+                reward = True; i += 1
+            elif arg in ('--agent', '--identity') and i + 1 < len(argv):
+                agent = argv[i + 1]; i += 2
+            elif arg == '--register' and i + 1 < len(argv):
+                register = argv[i + 1]; i += 2
+            elif arg == '--budget':
+                budget = take_int(argv, i, '--budget'); i += 2
+            elif arg == '--db' and i + 1 < len(argv):
+                db_path = argv[i + 1]; i += 2
+            elif arg == '--key' and i + 1 < len(argv):
+                api_key = argv[i + 1]; i += 2
             else:
-                audit = DEFAULT_AUDIT_LIMIT
-                i += 1
-        elif arg == '--auto':
-            auto = True
-            i += 1
-        elif arg == '--prefilter':
-            prefilter = True
-            i += 1
-        elif arg == '--reward':
-            reward = True
-            i += 1
-        elif arg in ('--agent', '--identity') and i + 1 < len(argv):
-            agent = argv[i + 1]
-            i += 2
-        elif arg == '--register' and i + 1 < len(argv):
-            register = argv[i + 1]
-            i += 2
-        elif arg == '--budget' and i + 1 < len(argv):
-            budget = int(argv[i + 1])
-            i += 2
-        elif arg == '--db' and i + 1 < len(argv):
-            db_path = argv[i + 1]
-            i += 2
-        elif arg == '--key' and i + 1 < len(argv):
-            api_key = argv[i + 1]
-            i += 2
-        else:
-            print(f"Unknown option: {arg}", file=sys.stderr)
-            return 2
+                print(f"Unknown option: {arg}", file=sys.stderr)
+                return 2
+    except ValueError as exc:
+        print(f"Usage: {exc}", file=sys.stderr)
+        return 2
 
     # --register：只开户、立身份，不召回（无需 query 也可用）
     if register:
@@ -943,9 +982,16 @@ def main(argv=None) -> int:
         return 0
 
     if since or until:
-        print("Usage: --since/--until 只能与 --timeline 或 --literal 一起用",
-              file=sys.stderr)
-        return 2
+        try:
+            since = _normalize_date(since, '--since')
+            until = _normalize_date(until, '--until')
+        except ValueError as exc:
+            print(f"Usage: {exc}", file=sys.stderr)
+            return 2
+        if since and until and since > until:
+            print(f"Usage: --since ({since}) 晚于 --until ({until})，区间为空",
+                  file=sys.stderr)
+            return 2
 
     # --audit：只读留痕，不召回、不需要 embedding（审计要在任何环境下都能跑）
     if audit is not None:
@@ -953,7 +999,11 @@ def main(argv=None) -> int:
         return 0
 
     if not query:
-        print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] [--db PATH] [--key KEY] [--budget N]", file=sys.stderr)
+        hint = "（--since/--until 是约束，需要搭配 --query / --timeline / --literal 使用）" \
+            if (since or until) else ""
+        print("Usage: recall.py --query '...' [--auto] [--k N] [--agent NAME] "
+              "[--db PATH] [--key KEY] [--budget N] [--since YYYY-MM-DD] "
+              f"[--until YYYY-MM-DD]{hint}", file=sys.stderr)
         return 1
 
     config = {'api_key': api_key, 'dimension': 1024}
@@ -965,18 +1015,21 @@ def main(argv=None) -> int:
         # 声明身份即开户：即使该区还没写过日记，也已立身份、在 list_agents 中可见
         ensure_agent(agent)
         results = recall_by_identity(query, client, identity=agent, k=k,
-                                     prefilter=prefilter, cache=True)
+                                     prefilter=prefilter, cache=True,
+                                     since=since, until=until)
         results = dedupe_results(fit_to_budget(results, budget))
         if reward and results:
             feedback_reward(get_db_path(agent), [r['chunk_id'] for r in results])
         output = format_recall_output(results)
         print(output)
         _ledger_append(agent, 'associative', query, results,
-                       {'k': k, 'prefilter': prefilter, 'budget': budget})
+                       {'k': k, 'prefilter': prefilter, 'budget': budget,
+                        'since': since, 'until': until})
         return 0
 
     if auto:
-        result = auto_recall(query, client, k=k, prefilter=prefilter, cache=True)
+        result = auto_recall(query, client, k=k, prefilter=prefilter, cache=True,
+                             since=since, until=until)
         if result['name']:
             print(f"[自动路由] → 匹配到智能体「{result['name']}」({result['description']}, 相似度={result['score']:.3f})\n")
         results = dedupe_results(fit_to_budget(result['results'], budget))
@@ -985,19 +1038,22 @@ def main(argv=None) -> int:
         output = format_recall_output(results)
         print(output)
         _ledger_append(result.get('name') or agent, 'associative', query, results,
-                       {'route': 'auto', 'k': k, 'prefilter': prefilter})
+                       {'route': 'auto', 'k': k, 'prefilter': prefilter,
+                        'since': since, 'until': until})
         return 0
 
     db_path = db_path or get_db_path(agent)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    results = recall(query, db_path, client, k=k, prefilter=prefilter)
+    results = recall(query, db_path, client, k=k, prefilter=prefilter,
+                     since=since, until=until)
     results = dedupe_results(fit_to_budget(results, budget))
     if reward and results:
         feedback_reward(db_path, [r['chunk_id'] for r in results])
     output = format_recall_output(results)
     print(output)
     _ledger_append(agent, 'associative', query, results,
-                   {'k': k, 'prefilter': prefilter, 'db': db_path})
+                   {'k': k, 'prefilter': prefilter, 'db': db_path,
+                    'since': since, 'until': until})
     return 0
 
 
