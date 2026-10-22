@@ -23,7 +23,7 @@ from scripts.config import get_db_path, ensure_agent  # noqa: E402
 from scripts.ledger import append_entry as ledger_append  # noqa: E402
 from scripts.recall import (  # noqa: E402
     recall_associative, dedupe_results, fit_to_budget, format_recall_output,
-    normalize_date,
+    normalize_date, take_value, take_int, take_float,
 )
 
 # 命中即必召回的意图触发词（对齐 SKILL.md「触发条件」表）。
@@ -145,35 +145,39 @@ def main(argv=None) -> int:
     until = None
 
     i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == '--message' and i + 1 < len(argv):
-            message = argv[i + 1]; i += 2
-        elif arg == '--query' and i + 1 < len(argv):
-            query = argv[i + 1]; i += 2
-        elif arg in ('--identity', '--agent') and i + 1 < len(argv):
-            identity = argv[i + 1]; i += 2
-        elif arg == '--db' and i + 1 < len(argv):
-            db_path = argv[i + 1]; i += 2
-        elif arg == '--budget' and i + 1 < len(argv):
-            budget = int(argv[i + 1]); i += 2
-        elif arg == '--k' and i + 1 < len(argv):
-            k = int(argv[i + 1]); i += 2
-        elif arg == '--mmr' and i + 1 < len(argv):
-            mmr = float(argv[i + 1]); i += 2
-        elif arg == '--cooldown' and i + 1 < len(argv):
-            cooldown = float(argv[i + 1]); i += 2
-        elif arg == '--since' and i + 1 < len(argv):
-            since = argv[i + 1]; i += 2
-        elif arg == '--until' and i + 1 < len(argv):
-            until = argv[i + 1]; i += 2
-        elif arg == '--force':
-            force = True; i += 1
-        elif arg == '--multi-scale':
-            multi_scale = True; i += 1
-        else:
-            print(f"Unknown option: {arg}", file=sys.stderr)
-            return 2
+    try:
+        while i < len(argv):
+            arg = argv[i]
+            if arg == '--message' and i + 1 < len(argv):
+                message = argv[i + 1]; i += 2
+            elif arg == '--query' and i + 1 < len(argv):
+                query = argv[i + 1]; i += 2
+            elif arg in ('--identity', '--agent') and i + 1 < len(argv):
+                identity = argv[i + 1]; i += 2
+            elif arg == '--db' and i + 1 < len(argv):
+                db_path = argv[i + 1]; i += 2
+            elif arg == '--budget':
+                budget = take_int(argv, i, '--budget'); i += 2
+            elif arg == '--k':
+                k = take_int(argv, i, '--k'); i += 2
+            elif arg == '--mmr':
+                mmr = take_float(argv, i, '--mmr'); i += 2
+            elif arg == '--cooldown':
+                cooldown = take_float(argv, i, '--cooldown'); i += 2
+            elif arg == '--since':
+                since = take_value(argv, i, '--since'); i += 2
+            elif arg == '--until':
+                until = take_value(argv, i, '--until'); i += 2
+            elif arg == '--force':
+                force = True; i += 1
+            elif arg == '--multi-scale':
+                multi_scale = True; i += 1
+            else:
+                print(f"Unknown option: {arg}", file=sys.stderr)
+                return 2
+    except ValueError as exc:
+        print(f"Usage: {exc}", file=sys.stderr)
+        return 2
 
     if not message:
         print("Usage: prep.py --message '...' [--identity NAME] [--query '...'] "

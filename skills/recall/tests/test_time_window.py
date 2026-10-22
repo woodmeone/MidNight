@@ -260,3 +260,26 @@ def test_prep_cli_without_window_is_unchanged(db, capsys):
     out = capsys.readouterr().out
     assert '八月版本' in out
     assert '十月版本' in out
+
+
+# ============================================================
+# 8. 对抗审查发现：--since/--until 吞掉下一个 flag（#5 修过 --literal，
+#    窗口参数漏了）。PowerShell 丢空串时 `--since --budget 500` 会把
+#    `--budget` 当日期、`500` 报 Unknown option——报错指向错误的参数。
+# ============================================================
+
+@pytest.mark.parametrize('which', ['recall', 'prep'])
+def test_window_flag_does_not_swallow_next_flag(db, capsys, which):
+    import scripts.prep as prep_mod
+    argv = {
+        'recall': ['--query', '备课', '--identity', 'probe',
+                   '--since', '--budget', '500'],
+        'prep': ['--message', '还记得吗', '--identity', 'probe',
+                 '--force', '--since', '--budget', '500'],
+    }[which]
+    main_fn = recall_main if which == 'recall' else prep_mod.main
+    rc = main_fn(argv)
+    assert rc == 2
+    err = capsys.readouterr().err
+    # 必须指向 --since 缺值，而不是把锅甩给后面的参数
+    assert '--since 缺少值' in err, err

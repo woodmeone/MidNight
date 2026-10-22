@@ -360,6 +360,44 @@ def _normalize_date(value: Optional[str], flag: str) -> Optional[str]:
 normalize_date = _normalize_date
 
 
+def take_value(argv, i: int, flag: str):
+    """取 flag 的值；下一个 token 是另一个 flag 时视为"缺值"（抛 ValueError）。
+
+    为什么必须显式拒绝：PowerShell 会把空字符串参数丢掉（`--since "" --budget 500`
+    到程序里变成 `--since --budget 500`），若照常吞值就会把 `--budget` 当日期、
+    `500` 报 Unknown option——**报错指向错误的参数**，用户按提示修了还修不好。
+    （#5 给 --literal 修过，#7 审查发现窗口参数漏了，一并收口。）
+    """
+    if i + 1 >= len(argv):
+        raise ValueError(f"{flag} 缺少值")
+    value = argv[i + 1]
+    if isinstance(value, str) and value.startswith('--'):
+        raise ValueError(f"{flag} 缺少值（下一个参数是 {value}）")
+    return value
+
+
+def take_int(argv, i: int, flag: str) -> int:
+    """取数值参数并转 int；缺值/非数字都给人话报错，不留裸 traceback。
+
+    `--timeline --identity X` 原来直接 `int('--identity')` 崩栈——
+    用户看到的是 Python 堆栈，不是"参数写错了"。
+    """
+    raw = take_value(argv, i, flag)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{flag} 需要整数，收到 {raw!r}") from None
+
+
+def take_float(argv, i: int, flag: str) -> float:
+    """取数值参数并转 float；同上，给人话报错。"""
+    raw = take_value(argv, i, flag)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{flag} 需要数字，收到 {raw!r}") from None
+
+
 def _escape_like(text: str) -> str:
     """把 LIKE 的通配符转义成字面：`%`/`_`/`\\` 必须当普通字符。"""
     return (text.replace('\\', '\\\\')
@@ -824,21 +862,6 @@ def _ledger_append(agent, channel: str, query: str, results, extra: dict = None)
         return False
 
 
-def _take_value(argv, i: int, flag: str):
-    """取 flag 的值；下一个 token 是另一个 flag 时视为"缺值"。
-
-    为什么必须显式拒绝：PowerShell 会把空字符串参数丢掉（`--literal "" --identity X`
-    到程序里变成 `--literal --identity X`），若照常吞值就会把 `--identity` 当成搜索词，
-    用户看到的是"查不到记忆"而不是"参数写错了"——静默失败比报错危险得多。
-    """
-    if i + 1 >= len(argv):
-        raise ValueError(f"{flag} 缺少值")
-    value = argv[i + 1]
-    if isinstance(value, str) and value.startswith('--'):
-        raise ValueError(f"{flag} 缺少值（下一个参数是 {value}）")
-    return value
-
-
 def main(argv=None) -> int:
     """CLI: python recall.py --query '...' [--auto] [--k N] [--agent NAME]
     [--db PATH] [--key KEY] [--prefilter]
@@ -861,66 +884,52 @@ def main(argv=None) -> int:
     since = None
     until = None
 
+    # 参数解析统一收口：take_* 抛 ValueError → 一次捕获、人话报错、退出码 2。
+    # （逐 flag try 是重复；裸 int() 是 traceback。两者都是"报错不指参数"。）
     i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == '--query' and i + 1 < len(argv):
-            query = argv[i + 1]
-            i += 2
-        elif arg == '--k' and i + 1 < len(argv):
-            k = int(argv[i + 1])
-            i += 2
-        elif arg == '--timeline' and i + 1 < len(argv):
-            timeline = int(argv[i + 1])
-            i += 2
-        elif arg == '--literal':
-            try:
-                literal = _take_value(argv, i, '--literal')
-            except ValueError as exc:
-                print(f"Usage: {exc}", file=sys.stderr)
-                return 2
-            i += 2
-        elif arg == '--since' and i + 1 < len(argv):
-            since = argv[i + 1]
-            i += 2
-        elif arg == '--until' and i + 1 < len(argv):
-            until = argv[i + 1]
-            i += 2
-        elif arg == '--audit':
-            # 可选值：`--audit 5` 看最近 5 条，`--audit` 用默认条数
-            if i + 1 < len(argv) and argv[i + 1].isdigit():
-                audit = int(argv[i + 1])
-                i += 2
+    try:
+        while i < len(argv):
+            arg = argv[i]
+            if arg == '--query' and i + 1 < len(argv):
+                query = argv[i + 1]; i += 2
+            elif arg == '--k':
+                k = take_int(argv, i, '--k'); i += 2
+            elif arg == '--timeline':
+                timeline = take_int(argv, i, '--timeline'); i += 2
+            elif arg == '--literal':
+                literal = take_value(argv, i, '--literal'); i += 2
+            elif arg == '--since':
+                since = take_value(argv, i, '--since'); i += 2
+            elif arg == '--until':
+                until = take_value(argv, i, '--until'); i += 2
+            elif arg == '--audit':
+                # 可选值：`--audit 5` 看最近 5 条，`--audit` 用默认条数
+                if i + 1 < len(argv) and argv[i + 1].isdigit():
+                    audit = int(argv[i + 1]); i += 2
+                else:
+                    audit = DEFAULT_AUDIT_LIMIT; i += 1
+            elif arg == '--auto':
+                auto = True; i += 1
+            elif arg == '--prefilter':
+                prefilter = True; i += 1
+            elif arg == '--reward':
+                reward = True; i += 1
+            elif arg in ('--agent', '--identity') and i + 1 < len(argv):
+                agent = argv[i + 1]; i += 2
+            elif arg == '--register' and i + 1 < len(argv):
+                register = argv[i + 1]; i += 2
+            elif arg == '--budget':
+                budget = take_int(argv, i, '--budget'); i += 2
+            elif arg == '--db' and i + 1 < len(argv):
+                db_path = argv[i + 1]; i += 2
+            elif arg == '--key' and i + 1 < len(argv):
+                api_key = argv[i + 1]; i += 2
             else:
-                audit = DEFAULT_AUDIT_LIMIT
-                i += 1
-        elif arg == '--auto':
-            auto = True
-            i += 1
-        elif arg == '--prefilter':
-            prefilter = True
-            i += 1
-        elif arg == '--reward':
-            reward = True
-            i += 1
-        elif arg in ('--agent', '--identity') and i + 1 < len(argv):
-            agent = argv[i + 1]
-            i += 2
-        elif arg == '--register' and i + 1 < len(argv):
-            register = argv[i + 1]
-            i += 2
-        elif arg == '--budget' and i + 1 < len(argv):
-            budget = int(argv[i + 1])
-            i += 2
-        elif arg == '--db' and i + 1 < len(argv):
-            db_path = argv[i + 1]
-            i += 2
-        elif arg == '--key' and i + 1 < len(argv):
-            api_key = argv[i + 1]
-            i += 2
-        else:
-            print(f"Unknown option: {arg}", file=sys.stderr)
-            return 2
+                print(f"Unknown option: {arg}", file=sys.stderr)
+                return 2
+    except ValueError as exc:
+        print(f"Usage: {exc}", file=sys.stderr)
+        return 2
 
     # --register：只开户、立身份，不召回（无需 query 也可用）
     if register:
