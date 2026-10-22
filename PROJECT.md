@@ -67,4 +67,4 @@ recall 内部模块分工：
 
 ## 演进方向
 
-不设独立进度文件：意图与验收住 Issue（`.scratch/` + GitHub），合入即真相更新。当前开放中的是 Issue #2（PR #1，`feature/v2-self-object-memory`）：可移植召回核心，四票已全部交付。
+不设独立进度文件：意图与验收住 Issue（`.scratch/` + GitHub），合入即真相更新。开放中的工作以 `gh issue list` 为准，本文档不维护进度快照（历史快照必然过期，见不变量 1）。
