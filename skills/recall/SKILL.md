@@ -231,7 +231,8 @@ python recall.py --identity qinglan --query "用户的问题" --k 10 --tag-weigh
 from scripts.recall import recall_associative
 # 注意：db 路径是当前 agent 专属库 ~/.midnight/recall/<agent>/recall.db，不是根级 recall.db
 results = recall_associative("用户的问题", "~/.midnight/recall/default/recall.db", embedding_client,
-                             k=10, tag_weight=0.3, time_ratio=0.2, truncate=1.0)
+                             k=10, tag_weight=0.3, time_ratio=0.2, truncate=1.0,
+                             since="2026-10-01", until=None)   # 时间窗约束（闭区间，可单用）
 ```
 
 ## 路由表
@@ -244,6 +245,7 @@ results = recall_associative("用户的问题", "~/.midnight/recall/default/reca
 | 用户说"还记得吗" | 10 | 0.5 | 0.1 | 0.3 | 联想优先，找最相关的 |
 | 用户说"帮我回忆上次XXX" | 10 | 0.3 | 0.2 | 0.5 | 平衡模式 |
 | 沉默后回复 | 5 | 0.3 | 0.3 | 0.3 | 轻量召回，快速给上下文 |
+| 时间 × 语义（"十月以后关于备课的"） | 10 | 0.3 | 0.2 | 0.5 | 主干 + `--since/--until` 约束，一次调用 |
 | 用户明确说"记住"（不触发召回） | — | — | — | — | 只写日记，不做召回 |
 
 ## init 引导（首建自我 + 认识你）
