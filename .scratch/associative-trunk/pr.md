@@ -1,4 +1,4 @@
-﻿## 用户故事
+## 用户故事
 
 作为记忆的使用者（赖老师），我想要「**十月以后关于备课的进展**」这种**时间 × 语义**的混合问题一次问出口，以便不用先查时间轴、再查联想、再自己对齐两个结果。
 
@@ -24,6 +24,12 @@ Closes #7
 | 票3 形态收敛 | `a2ad4bb` | SKILL.md 重写为「一条主干 + 两个约束」；ADR-0003；PROJECT/CONTEXT 回写；契约测试锁定新表述 |
 | 探针 | 8d8f5f3 | 时间窗 × prefilter / multi_scale / MMR / cache 组合矩阵 + "窗口必须真的收窄"断言 |
 
+### 审查后追加的修复（"报错不指参数"类静默失败）
+
+| commit | 修的是什么 |
+|---|---|
+| `6a82620` | **CLI 参数解析统一收口**：`--since --budget 500`（PowerShell 丢空串时）会把 `--budget` 当日期、`500` 报 Unknown option——报错指向错误的参数；`--timeline --identity X` 直接 `int()` 崩出裸 traceback。现在 `take_value / take_int / take_float` 共享口径，缺值/非数字一律 `Usage: --xxx 缺少值` 退出码 2，`recall.py` 与 `prep.py` 同修。#5 曾给 `--literal` 修过同款，这次把其余参数全部收进同一防线；红→绿测试 `test_window_flag_does_not_swallow_next_flag[recall/prep]` 锁定 |
+
 **核心设计**（ADR-0003）：约束 ≠ 排序。时间窗过滤候选池（"在哪些记忆里找"），联想主干在其内排序（"哪条最像"）。窗口必须同时压两处——向量层 SQL 和 tag-first 扩增的元数据查询；只压一处，窗外记忆会从标签后门溜回来。`--timeline` / `--literal` 保留，重新定位为"约束的退化形态"（只要过滤、不要排序）。
 
 ## 验收对照
@@ -43,7 +49,7 @@ Closes #7
 ## 测试
 
 - G1 基线：**320 passed / 6 skipped**（`6a95f4e`）
-- G2 终态：**339 passed / 6 skipped**（+19，零回归）
+- G2 终态：**341 passed / 6 skipped**（+21，零回归）
 - 对抗探针：`tests/probe_adversarial.py` 全绿（新增窗口矩阵 10 项，含"窗口反而变宽"与"窗外混入"两条硬断言）
 - 真库验证：见上方实证表
 
