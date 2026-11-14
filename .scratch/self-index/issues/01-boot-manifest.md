@@ -2,6 +2,11 @@
 
 Issue: #9 ｜ Spec: `../spec.md` ｜ Blocked by: 无 ｜ 分支: `feat/self-index`
 
+> **本文件自包含**。执行方不需要看任何对话历史，读完这份就能开工。
+> 所有路径相对仓库根 `D:\Project\globalSkills-library\MidNight`。
+
+---
+
 ## 用户故事
 
 作为**刚醒来的智能体**，我想要会话第一条就看到「我是谁 + 我有哪些长期内容」，
@@ -38,8 +43,7 @@ Issue: #9 ｜ Spec: `../spec.md` ｜ Blocked by: 无 ｜ 分支: `feat/self-inde
 - 能**改变判断**的知识框架（`kb/S4-失败与边界.md`）
 - 能**直接引用**的外部项目卡片（`refs/A13-poolsvc.md`）
 
-**分类判据是「拿出来做什么」（动词），不是「它是什么」（名词）。**
-这条不是我定的——见下面的实证。
+**分类判据是「拿出来做什么」（动词），不是「它是什么」（名词）。** 这条不是我定的，见背景里的实证。
 
 ### 它和记忆的分工（最容易混的一处）
 
@@ -51,15 +55,15 @@ Issue: #9 ｜ Spec: `../spec.md` ｜ Blocked by: 无 ｜ 分支: `feat/self-inde
 | 怎么找到 | **联想召回**（按话题自己浮上来） | **扫描 + 三级加载**（主动翻） |
 | 生命周期 | 只增不减，正文永不删 | 会建、会改、会退休 |
 
-同一件事可能两处都有，但**角色不同**：
+同一件事两处都有也正常，角色不同：
 
 ```
 「上次用学情三段式做 2501 班备课，卡在迁移点写不出来」  → 记忆，走联想
 「学情三段式框架本身」                                  → 长期内容，走索引
 ```
 
-**记忆负责记住「我用过它」，长期内容负责「它本身」。** 这两句话分别住两个地方，
-靠日记里的引用串起来——单向依赖：记忆能指向长期内容，长期内容不依赖记忆。
+**记忆负责记住「我用过它」，长期内容负责「它本身」。**
+单向依赖：记忆能指向长期内容，长期内容不依赖记忆——任一方被删，另一方的腿都断不了。
 
 ---
 
@@ -67,23 +71,16 @@ Issue: #9 ｜ Spec: `../spec.md` ｜ Blocked by: 无 ｜ 分支: `feat/self-inde
 
 ### 实证：开编已经自己长出来了
 
-`kaibian` 的 `self.md` 里写着：
+`kaibian`（`~/.midnight/recall/kaibian/self.md`）里写着：
 
 > 记忆（发生过什么）走 `dailynote/`；知识（下次怎么做）走 `kb/`；可复用的现成项目走 `refs/`。**三者不混。**
 
-11-14 它又加了四类，并写了一份的总索引：
-
-```
-tools/       能直接跑的脚本    → 直接执行，不改一行
-snippets/    能直接抄的代码片段 → 复制进新项目
-templates/   目录结构与骨架     → 照它铺新项目
-checklists/  上线前逐条勾的清单 → 上线前过一遍
-```
+它自己分出的六类：`tools/`（能直接跑）、`snippets/`（能直接抄）、`templates/`（能照铺）、
+`checklists/`（能逐条勾）、`kb/`（改变判断）、`refs/`（外部卡片），外加一份总索引。
 
 它自己总结的判据：
 
-> 分类标准不是「主题」（都跟接码有关），而是「**拿出来做什么**」。
-> 库大小不是成绩，命中率才是。
+> 分类标准不是「主题」，而是「**拿出来做什么**」。库大小不是成绩，命中率才是。
 
 **这套东西就是长期内容。不是我设计出来的，是被真实需求逼出来的。**
 
@@ -93,16 +90,14 @@ checklists/  上线前逐条勾的清单 → 上线前过一遍
 
 > 失：我还是先按文档思路做了一遍，是用户提醒才想到存可执行资产。
 
-原因很直白——**干活的时候看不见自己有 `tools/`。**
-
-它踩了七个坑、花三轮修好一个功能，把经验整理成 60 条清单，然后**下一次开工时这份清单不在它眼前**。
+它踩了七个坑、花三轮修好一个功能、把经验整理成 60 条清单——**然后下一次开工时这份清单不在它眼前**。
 
 那一声「用户提醒」，就是本 Issue 要消掉的东西。
 
 ### 现在为什么没有
 
-`session_start.py` 里有 `compile_identity_summary()`，只编译 self.md 的字段，没有任何流程调用它，
-也不含长期内容。**零件有，没装上。**
+`skills/recall/scripts/session_start.py` 里有 `compile_identity_summary()`，只编译 self.md 的字段，
+**没有任何流程调用它，也不含长期内容**。零件有，没装上。
 
 ---
 
@@ -115,88 +110,278 @@ checklists/  上线前逐条勾的清单 → 上线前过一遍
    「我的代码过时了所以它消失了」——荒谬。
 3. **生命周期相反**：`chunks` 没有删除语义（只增不减是第一性质），长期内容必须能建、能改、能退休。
 
-所以：**长期内容归文件系统，数据库里只留记忆。**
+**所以：长期内容归文件系统，数据库里只留记忆。**
 
 ---
 
-## 目标形态
+## 实现规格
 
-### 开机清单（会话第一条，只注入一次）
+### 文件
 
-```
-[开机] 我是开编｜第一性原理、复用优先、克制｜边界:不收噪音进 kb
+新建 `skills/recall/scripts/boot.py`。**不改任何现有文件。**
 
-长期内容  tools 2 · snippets 1 · templates 5 · checklists 1 · kb 12 · refs 14
-          → <工作区>/LONGTERM.md
-```
+### import 头（照抄现有模式）
 
-约 60 字，硬预算 120 字。
+```python
+import os
+import sys
 
-### 三级加载
-
-```
-① 一行类目（开机清单）
-      ↓ 想用某一类
-② read LONGTERM.md（总索引，智能体自己写）
-      ↓ 挑中一件
-③ read tools/upstream_preflight.py
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPTS_DIR)                      # 让 from embedding 可用
+sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可用
+from scripts.config import get_agent_dir  # noqa: E402
+from scripts.self_model import read_self  # noqa: E402
 ```
 
-**三次 `read`，零次查询。** 没有 `find`、没有 `list`、没有 `show` —— skill 没有这一步，长期内容也不该有。
+### 公共接口
 
-### 目录由智能体自定义
+```python
+DEFAULT_BUDGET = 120          # 字符数硬上限
+INDEX_FILENAME = 'LONGTERM.md'  # 长期内容总索引的默认文件名
+ENTRY_SWITCH = 5              # 条目总数 ≤ 此值时直出条目名，否则给类目计数
 
-系统只认两件事：**一个索引文件**（默认 `LONGTERM.md`）+ **其下的子目录**。
-子目录叫什么、分几类，智能体自己定（开编分了六类，别的智能体分三类也行）。
+def scan_longterm(roots: list[str]) -> dict:
+    """扫长期内容根。
+
+    返回 {
+      'categories': {类目名: 文件数},   # 按类目名升序，便于确定性输出
+      'entries':    [文件名(去扩展名)],  # 全部条目，按路径升序
+      'index_file': 绝对路径 | None,     # 找到的第一个 LONGTERM.md
+      'unavailable': [不存在的 root],    # 供失败态文案使用
+    }
+    """
+
+def compile_boot_manifest(identity: str, workspace: str = None,
+                          budget: int = DEFAULT_BUDGET) -> str:
+    """编译开机清单。返回可直接注入上下文的文本块（含末尾换行）。"""
+
+def main(argv=None) -> int:
+    """CLI: python boot.py --identity NAME [--workspace PATH] [--budget N]"""
+```
+
+### 扫描算法（`scan_longterm`）
+
+对每个 root 依次：
+
+1. root 不存在或不是目录 → 加入 `unavailable`，跳过。
+2. root 下若有 `INDEX_FILENAME`（`LONGTERM.md`）→ 若 `index_file` 仍为 `None`，记为它。
+3. 遍历 root 的**直接子目录**（不递归进子目录再当类目）：
+   - 每个直接子目录 = 一个**类目**，类目名 = 子目录名
+   - 该类目的计数 = 该子目录下**递归**的文件数（含更深层子目录里的文件）
+   - 跳过以 `.` 开头的隐藏目录
+4. 遍历该子目录下**递归**的所有文件 → 文件名去扩展名后放入 `entries`
+   - 跳过以 `.` 开头的隐藏文件
+5. root 直接放着的文件（不在任何子目录里）→ 也算 `entries`，但**不产生类目**
+
+多 root 时合并：`categories` 同名累加，`entries` 去重后合并。
+
+**确定性要求**：`categories` 按 key 升序返回，`entries` 按路径升序。
+
+### 默认扫描根
+
+```python
+roots = [os.path.join(get_agent_dir(identity), 'longterm')]
+if workspace:
+    roots.insert(0, workspace)      # 工作区优先，索引文件先找到它
+```
+
+即：**工作区在前，agent 目录在后**。
+
+### 渲染格式（逐字）
+
+输出两块，中间一个空行：
+
+**第一块 · 人设**
+
+```
+[开机] 我是{name}｜{style}｜边界:{boundary}
+```
+
+- 分隔符是**全角竖线 `｜`**，不是 `|`
+- `name` ← `read_self(identity)['name']`；缺失时用 `identity` 本身
+- `style` ← `read_self(identity)['mutable']['persona_style']`；缺失时**整段省略**（连 `｜` 一起）
+- `boundary` ← `read_self(identity)['mutable']['boundary']`；缺失时**整段省略**
+- `self.md` 完全不存在 → 只输出 `[开机] 我是{identity}`，**不报错、不退出非零**
+
+**第二块 · 长期内容**（四种情形，按优先级判定）
+
+情形 1 —— 所有 root 都不可用：
+
+```
+长期内容  不可用（{第一个 unavailable 的路径} 不存在）
+```
+
+情形 2 —— 可用 root 存在但一条内容都没有（`categories` 与 `entries` 全空）：
+
+```
+长期内容  无
+```
+
+情形 3 —— 条目总数 ≤ `ENTRY_SWITCH`（5）：
+
+```
+长期内容  {entry1} · {entry2} · {entry3}
+          → {index_file 绝对路径}
+```
+
+- 条目间用 ` · `（空格 + 中点 + 空格）
+- 第二行行首缩进 **10 个半角空格**（与「长期内容  」对齐）
+- `index_file` 为 `None` 时，第二行整行省略
+
+情形 4 —— 条目总数 > 5：
+
+```
+长期内容  {cat1} {n1} · {cat2} {n2} · {cat3} {n3}
+          → {index_file 绝对路径}
+```
+
+- 类目间同样用 ` · `
+- 类目按名字升序
+- `index_file` 为 `None` 时，第二行整行省略
+
+### 预算裁剪（`budget` 默认 120）
+
+按下面的顺序**逐级降级、重新渲染**，每次渲染后检查 `len(text) <= budget`，满足即返回：
+
+| 级别 | 动作 |
+|---|---|
+| L0 | 全量渲染（按上面的格式） |
+| L1 | 类目/条目列表只保留前 3 项，尾部加 ` · …` |
+| L2 | 类目/条目列表只保留前 1 项 |
+| L3 | 砍掉人设的「边界:」段 |
+| L4 | 砍掉人设的「风格」段 |
+| L5 | 长期内容只留 `长期内容  {总数} 项` |
+| L6 | 只留 `[开机] 我是{name}` |
+
+**硬规则**：
+- **绝不截断半句**——不允许 `text[:budget]` 这种切法。每一级都是完整渲染。
+- `[开机]` 标记和 `我是{name}` **永不砍**（L6 是地板）。
+- 若 L6 仍超预算（例如 name 超长），允许超预算返回 L6 的完整输出——**宁超不残**。
+
+### CLI
+
+```
+python boot.py --identity NAME [--workspace PATH] [--budget N]
+```
+
+| 情况 | 退出码 | 行为 |
+|---|---|---|
+| 正常 | 0 | stdout 打印清单 |
+| 缺 `--identity` | 2 | stderr: `Usage: boot.py --identity NAME [--workspace PATH] [--budget N]` |
+| `--budget` 非整数 | 2 | stderr 人话报错，可照抄 `recall.py` 的 `take_int` 写法 |
+| 未知参数 | 2 | stderr: `Unknown option: {arg}` |
+
+### 只读保证
+
+`boot.py` **不得**：创建任何文件、写 `recall.db`、写 `retrieval_ledger.jsonl`、
+修改任何 `mtime`。它只读文件系统。
+
+---
+
+## 测试
+
+新建 `skills/recall/tests/test_boot.py`。**照抄 `tests/test_session_start.py` 的 fixture 模式**：
+
+```python
+import scripts.config as cfg
+from scripts.self_model import ensure_self
+
+@pytest.fixture
+def basedir():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        old_base = cfg.BASE_DIR
+        cfg.BASE_DIR = tmp
+        yield tmp
+        cfg.BASE_DIR = old_base
+```
+
+构造长期内容：直接在 `get_agent_dir(agent)/longterm/` 下建目录和空文件即可。
+
+### 必须有的用例
+
+| # | 测试名 | 断言 |
+|---|---|---|
+| 1 | `test_manifest_contains_identity_and_category` | 有 self.md + `longterm/tools/` 2 个文件 → 输出含 name 与 `tools 2` |
+| 2 | `test_entries_shown_when_few` | 共 3 个文件（≤5）→ 输出含文件名，不含「`{类目} {数}`」形态 |
+| 3 | `test_categories_shown_when_many` | 共 6 个类目 → 输出含类目计数，不含具体文件名 |
+| 4 | `test_index_file_path_shown` | 有 `LONGTERM.md` → 输出含该绝对路径 |
+| 5 | `test_missing_longterm_reports_unavailable` | 无 longterm 目录 → 含「不可用」与路径 |
+| 6 | `test_empty_longterm_says_none` | 目录存在但空 → 含「无」，不含「不可用」 |
+| 7 | `test_missing_self_degrades` | 无 self.md → 不抛异常，含 `[开机] 我是{identity}` |
+| 8 | `test_nested_subdir_counts_as_one_category` | `kb/S1/x.md` → 类目 `kb` 计数为 1，不出现类目 `S1` |
+| 9 | `test_budget_hard_limit` | `budget=60` + 超长输入 → `len(out) <= 60` |
+| 10 | `test_budget_never_truncates_mid_sentence` | 裁剪后不以残缺字符结尾；只允许以 `…`、`）`、`{n}` 或换行收尾 |
+| 11 | `test_budget_floor_keeps_name` | `budget=1` → 仍含 `我是{identity}` |
+| 12 | `test_deterministic` | 连跑两次，输出逐字节相同 |
+| 13 | `test_readonly_no_mtime_change` | 跑前记录 longterm 下所有文件 mtime，跑后完全一致 |
+| 14 | `test_cli_requires_identity` | 无参数 → 返回 2 |
+| 15 | `test_cli_prints_manifest` | 正常调用 → stdout 含 `[开机]` |
+| 16 | `test_workspace_root_priority` | `--workspace` 下有 LONGTERM.md → index_file 指向它而非 agent 目录 |
+
+### 跑法
+
+```bash
+cd D:\Project\globalSkills-library\MidNight\skills\recall
+python -m pytest tests/test_boot.py -q            # 只跑新测试
+python -m pytest tests -q                         # 全量回归
+```
+
+**G1 基线：343 passed / 6 skipped**（2026-11-14 实测于 `feat/self-index` @ `develop`）。
+加完本 Issue 后应为 **359 passed / 6 skipped**（+16）。
 
 ---
 
 ## 验收标准
 
-- [ ] 新增 `skills/recall/scripts/boot.py`，对外一个函数 + 一个 CLI：
-      `compile_boot_manifest(identity, workspace=None, budget=120) -> str`
-- [ ] 输出含两块：**人设摘要**（name / 风格 / 边界）+ **长期内容**（类目计数或条目名 + 索引路径）
-- [ ] **硬预算 ≤120 字**；超预算按序砍（条目名 → 类目 → 人设补充项），**绝不截断半句**
-- [ ] **条目 vs 类目切换**：长期内容条目总数 ≤5 直出条目名；>5 按子目录给「类目 + 计数」
-- [ ] 扫描根候选：`<agent_dir>/longterm/`；若 `--workspace` 下存在 `LONGTERM.md` 则一并纳入
-- [ ] **长期内容目录不存在** → 明说「长期内容目录不可用（路径 X）」，禁止静默给空或给「无」
-- [ ] **self.md 不存在** → 人设段降级为 `我是 <identity>`，不崩
-- [ ] **只读**：跑完任何文件 `mtime` 不变；不建表、不写库、不写 jsonl
-- [ ] 现有 `prep.py` / `recall.py` / `session_start.py` 行为**逐位不变**（boot.py 是独立新入口）
-- [ ] 全量测试与 G1 基线一致（**343 passed / 6 skipped**，2026-11-14 实测于 `feat/self-index` @ `develop`）
+- [ ] 新增 `skills/recall/scripts/boot.py`，接口与上面「实现规格」逐条一致
+- [ ] 渲染格式**逐字符**符合四种情形（含全角 `｜`、` · `、10 空格缩进）
+- [ ] 硬预算 ≤120 字；裁剪按 L1–L6 逐级降级，**绝不截断半句**
+- [ ] 条目总数 ≤5 直出条目名；>5 按子目录给类目计数
+- [ ] 扫描根：`<agent_dir>/longterm/` + `--workspace`（工作区优先）
+- [ ] 四种失败/空态文案与规格一致
+- [ ] `self.md` 缺失时降级不崩
+- [ ] **只读**：不建文件、不写库、不改 mtime
+- [ ] 现有 `prep.py` / `recall.py` / `session_start.py` 行为**逐位不变**
+- [ ] 新增 16 个测试全绿；全量 **359 passed / 6 skipped**
+- [ ] 仓库内**不出现「资产」二字**（引用开编日记原文的除外）
 
 ## 票（垂直切片，按序实现）
 
-- [ ] 票1：扫描 + 渲染 —— 扫 self.md 与长期内容根，输出两块文本（先不限预算）｜ Blocked by: 无
-- [ ] 票2：预算裁剪 —— 120 字硬上限，按序降级，不截半句 ｜ Blocked by: 票1
-- [ ] 票3：CLI + 失败态 —— `--identity/--workspace/--budget`，三种失败态各给人话 ｜ Blocked by: 票2
+- [ ] **票1：扫描 + 渲染** —— `scan_longterm` + `compile_boot_manifest`（不限预算），覆盖测试 1–4、5–8、12、16 ｜ Blocked by: 无
+- [ ] **票2：预算裁剪** —— L1–L6 逐级降级，覆盖测试 9、10、11 ｜ Blocked by: 票1
+- [ ] **票3：CLI + 只读** —— `main()` + 参数校验，覆盖测试 13、14、15 ｜ Blocked by: 票2
+
+每张票 = 一个 commit，message 带 `(#9)`。
 
 ## 范围外（本轮不做）
 
 - **不做能力扫描**（技能库清单）——Issue #10 用一句指路替代
 - **不做同伴扫描**（`list_agents()`）——同上
 - **不做自动注入**：本轮只交付命令 + 文档纪律，不碰 harness 的 session-start hook
-- **不做长期内容的写入/编辑/退休**——本轮只让它们「被看见」，管理动作下个 Issue
+- **不做长期内容的写入/编辑/退休**——本轮只让它们「被看见」
 - **不动 `~/.midnight/recall/*/` 下任何数据**：只读
 - 不做开机清单的持久化/缓存（每次现扫）
+- 不建 `longterm/` 目录本身（不存在时按情形 1 报「不可用」）
 
 ## 对抗式自检（写测试时问自己）
 
-- 长期内容目录存在但全空 → 输出什么？不许是空串
+- 长期内容目录存在但全空 → 情形 2，不许是空串
 - 条目 5 条 / 6 条边界 → 切换点是否精确
 - 类目名超长（30 字）→ 预算怎么处理
-- 子目录里套子目录（`kb/S1/x.md`）→ 算一类还是两类
-- self.md 的 frontmatter 坏掉 → 崩不崩
+- 子目录里套子目录（`kb/S1/x.md`）→ 算一类
+- self.md 的 frontmatter 坏掉 → `read_self` 会返回什么，崩不崩
 - `--budget 10` → 还剩什么，还是空
 - 同一秒跑两次 → 输出是否确定性一致
-- 索引文件存在但指向的目录已删 → 报什么
+- 索引文件存在但指向的目录已删 → 报什么（应当照常按目录扫，索引只是路径展示）
+- Windows 路径反斜杠 → 输出里怎么显示（照 `os.path` 原样）
+- 中文文件名 → 预算按字符数还是字节数（**按字符数 `len()`**）
 
 ## 真相影响
 
 - **PROJECT.md**：模块地图加 `boot.py`；"核心业务流程"加第 6 条「开机」；
   "关键数据结构"说明**长期内容是目录不是表**，与记忆分家
-- **CONTEXT.md**：新增术语 **长期内容（long-term content）** 并给出四特征定义、
-  与「记忆」的区分；新增 **开机清单（boot manifest）**、**三级加载**
+- **CONTEXT.md**：新增术语 **长期内容（long-term content）**（含四特征定义、与「记忆」的区分）、
+  **开机清单（boot manifest）**、**三级加载**
 - **ADR**：`docs/adr/0004-long-term-content-as-files.md`——记录
-  「长期内容为什么不进库 / 为什么不走向量 / 为什么不进开机清单的是能力与同伴」
+  「长期内容为什么不进库 / 为什么不走向量 / 为什么能力与同伴不进清单」
   （三条件全中：难逆转、有真实取舍、后来者会问为什么）
