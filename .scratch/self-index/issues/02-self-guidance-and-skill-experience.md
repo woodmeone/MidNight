@@ -103,30 +103,15 @@ python self_model.py --add-paths [--agent X]
 
 ---
 
-### 改动二：`skills/recall/scripts/session_start.py`
+### 改动二：**不改** `session_start.py`
 
-#### 2.1 摘要带上 paths 的极短形式
+原本打算在 `compile_identity_summary()` 里追加一句摘要。**取消了**，两个理由：
 
-`compile_identity_summary()` 里，在 `capabilities` 那段之后追加：
+1. **`self.md` 本身就是那句话的家。** 开机清单（`boot.py`，#9）直接从 `self.md` 读人设段；
+   `session_start.py` 是另一条独立入口。两边都加 = 同一件事有两个源。
+2. **摘要是「身份」，不是「纪律」。** 把纪律塞进身份摘要，两边都变得不清晰。
 
-```python
-paths = mutable.get('paths')
-if paths:
-    parts.append('路径:先查技能库·有事问同伴')
-```
-
-- **固定短串**，不动态截取 `paths` 内容（动态截取容易产出半句，违背「不拦腰硬截」）
-- 全角间隔号 `·`，无空格
-- 追加位置：在 `能力:` 之后、`CAPABILITY_ANCHOR_TEXT` 之前
-- 整段约 14 字
-
-#### 2.2 预算
-
-Issue #9 的开机清单硬预算是 120 字。本句约 14 字，必须**优先于「风格」保留**——
-被砍顺序是：资产条目 → 能力类目 → 风格 → **路径（倒数第二才砍）** → 姓名（永不砍）。
-
-这个顺序写进 Issue #9 的 `boot.py` L1–L6 裁剪表。本 Issue 只在 `session_start.py` 里加这一句，
-不动裁剪逻辑（那是 #9 的活）。
+所以：**指路只住在 `self.md` 里**，谁读 self.md 谁就看得见。`session_start.py` 一个字节不动。
 
 ---
 
@@ -210,12 +195,9 @@ def basedir():
 | 4 | `test_add_paths_fills_missing` | 已有 self.md 无 paths → `add_paths` 返回 `added=True`，文件里出现那两句 |
 | 5 | `test_add_paths_noop_when_present` | 已有自定义 paths → `add_paths` 返回 `added=False`，文件内容不变 |
 | 6 | `test_add_paths_creates_when_absent` | 无 self.md → `add_paths` 建出带 paths 的 self.md |
-| 7 | `test_summary_contains_path_hint` | `compile_identity_summary` 输出含 `路径:先查技能库·有事问同伴` |
-| 8 | `test_summary_without_paths_omits_hint` | self.md 的 mutable 无 paths → 摘要**不含** `路径:`，且不报错 |
-| 9 | `test_summary_keeps_no_truncation` | 超长 persona_style 仍完整保留，不出现 `…`（复用现有行为） |
-| 10 | `test_cli_add_paths_json_output` | `main(['--add-paths','--agent',a])` → 退出码 0，输出可 `json.loads` |
-| 11 | `test_evolution_can_still_patch_paths` | `evolution.update_self(agent, {'paths': ['自定义']})` 生效（paths 是可动层，不被 protected） |
-| 12 | `test_evolution_rejects_immutable` | `update_self(agent, {'name': 'x'})` 被拒（现有行为不回归） |
+| 7 | `test_cli_add_paths_json_output` | `main(['--add-paths','--agent',a])` → 退出码 0，输出可 `json.loads` |
+| 8 | `test_evolution_can_still_patch_paths` | `evolution.update_self(agent, {'paths': ['自定义']})` 生效（paths 是可动层，不被 protected） |
+| 9 | `test_evolution_rejects_immutable` | `update_self(agent, {'name': 'x'})` 被拒（现有行为不回归） |
 
 ### 跑法
 
@@ -226,7 +208,7 @@ python -m pytest tests -q
 ```
 
 **G1 基线：343 passed / 6 skipped。**
-本 Issue 完成后应为 **358 passed / 6 skipped**（+12 新测试 +3 契约测试 = +15；
+本 Issue 完成后应为 **355 passed / 6 skipped**（+9 新测试 +3 契约测试 = +12；
 若 `test_skill_contract.py` 的 3 条并入现有文件计数，按实际数字核对，**失败数必须为 0**）。
 
 ---
@@ -238,16 +220,15 @@ python -m pytest tests -q
 - [ ] `add_paths(agent)` 幂等：已有 paths 不动；缺失才补
 - [ ] `ensure_self` **语义不变**：已有 self.md 不被改写
 - [ ] CLI `--add-paths` 可用，输出 JSON，退出码 0
-- [ ] `compile_identity_summary` 含 `路径:先查技能库·有事问同伴`
 - [ ] `SKILL.md` 有「## 能力经验（skill 经验）」章节，含标签约定与「不打分」
 - [ ] `test_skill_contract.py` 加 3 条契约测试且全绿
-- [ ] 新增 12 个测试全绿；全量失败数为 0
+- [ ] 新增 9 个测试全绿；全量失败数为 0
 - [ ] **不碰任何 `~/.midnight/recall/*/recall.db`**
 
 ## 票（垂直切片，按序实现）
 
-- [ ] **票1：模板与初始化** —— `DEFAULT_PATHS` + `DEFAULT_TEMPLATE` + `add_paths` + `--add-paths`，覆盖测试 1–6、10 ｜ Blocked by: 无
-- [ ] **票2：摘要带路径** —— `compile_identity_summary` 追加极短路径提示，覆盖测试 7–9、11、12 ｜ Blocked by: 票1
+- [ ] **票1：模板与初始化** —— `DEFAULT_PATHS` + `DEFAULT_TEMPLATE` + `add_paths` + `--add-paths`，覆盖测试 1–7 ｜ Blocked by: 无
+- [ ] **票2：不回归与可动层** —— 覆盖测试 8、9 ｜ Blocked by: 票1
 - [ ] **票3：文档与契约** —— `SKILL.md` 能力经验章节 + `README.md` + 契约测试，覆盖测试 17–19 ｜ Blocked by: 票1
 
 每张票 = 一个 commit，message 带 `(#10)`。
