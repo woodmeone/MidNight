@@ -54,7 +54,7 @@ C:\Users\WoodMe\.midnight\recall\qinglan\dailynote\2026-08-27_220734.md
 ## 范围外（本轮不做）
 
 - **不做打包脚本**（`bundle.py` / tar）：路径相对化完成后再单开 Issue
-- **不迁移资产**（资产本来就存相对工作区的路径，且不进库）
+- **不迁移长期内容**（长期内容本来就存相对工作区的路径，且不进库）
 - 不改 `chunks` / `files` 以外的任何表
 - 不动 `dailynote/*.md` 一个字节
 
