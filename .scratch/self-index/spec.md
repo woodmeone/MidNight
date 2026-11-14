@@ -9,6 +9,9 @@
 | [#9](https://github.com/woodmeone/MidNight/issues/9) | `issues/01-boot-manifest.md` | 开机清单生成器 `boot.py` | 只读 |
 | [#10](https://github.com/woodmeone/MidNight/issues/10) | `issues/02-self-guidance-and-skill-experience.md` | self.md 路径指路 + 能力经验约定 | 只改 self.md |
 | [#11](https://github.com/woodmeone/MidNight/issues/11) | `issues/03-relocatable-store.md` | 记忆库路径相对化 | `UPDATE files.file_path` |
+| [#12](https://github.com/woodmeone/MidNight/issues/12) | `issues/04-longterm-self-evolution.md` | 长期内容的自进化闭环 | 只读 |
+
+依赖：#12 依赖 #9（复用扫描）与 #10（同改 `DEFAULT_TEMPLATE`）。#11 独立。
 
 分支：`feat/self-index`（从 `develop` 拉出，`develop` 从 `main` 拉出）。
 
