@@ -158,3 +158,33 @@ def test_adr_0003_exists_and_records_the_convergence():
     assert 'expand_tag_candidates' in adr, '必须写明标签扩增也要压窗口'
     assert '缓存键' in adr
     assert '排完再筛' in adr
+
+
+# ============================================================
+# 5. 能力经验（Issue #10）
+# ============================================================
+
+def test_skill_md_has_skill_experience_section(skill):
+    """能力经验章节不可被删：标签约定与「不打分」是它的全部价值。"""
+    assert '## 能力经验' in skill
+    assert 'skill经验' in skill
+    assert '踩坑' in skill
+    assert '不打分' in skill
+
+
+def test_skill_md_says_paths_not_catalog(skill):
+    """能力存在性走「一句指路」，不是清单——这句不许被改成「列出来」。"""
+    assert '一句指路' in skill or '现查现用' in skill
+    # 反面：不许出现「开机清单里列 skill」这类指引
+    for line in skill.splitlines():
+        if '开机清单' in line and 'skill' in line.lower():
+            assert '不' in line or '别' in line, f'可疑的清单指引：{line!r}'
+
+
+def test_default_template_keeps_paths():
+    """paths 两句不能被人顺手删掉。"""
+    from scripts.self_model import DEFAULT_PATHS, DEFAULT_TEMPLATE
+    assert DEFAULT_TEMPLATE['mutable']['paths'] == DEFAULT_PATHS
+    joined = ' '.join(DEFAULT_PATHS)
+    assert '技能库' in joined
+    assert '同伴' in joined

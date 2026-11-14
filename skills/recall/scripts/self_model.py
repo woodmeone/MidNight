@@ -23,12 +23,31 @@ from scripts.config import get_self_path, get_agent_dir  # noqa: E402
 # 定海锚字段：mutable_only=True 时不可被 update_self 修改
 IMMUTABLE_KEYS = frozenset({'name', 'anchor_tags', 'description'})
 
+# 路径指路的两句默认文案（Issue #10）。
+#
+# 为什么不把能力清单/同伴名单塞进开机清单：#9 的开机清单只放「自己的长期内容」，
+# 而能力与同伴是**外面给的**——存在性写一句指路就永久有效，经验靠日记自然沉淀。
+# 自己长出来的要扫，外面给的只要一句指路。
+DEFAULT_PATHS = [
+    '遇到不会的活，先查技能库——那里有现成的做法，别自己从零造。',
+    '有事可以问同伴，别一个人硬扛。',
+]
+
+# 长期内容的自我维护意识（Issue #12）。可动层字段，允许演化，但不该被静默删除。
+DEFAULT_EVOLUTION = (
+    '长期内容是我自己的：想留就留，不想留就扔，我说了算。'
+    '每次收尾先问一句——这次的哪些动作可以留着下次用？'
+    'token 和上下文都很宝贵，清单越长，能留给正事的越少。'
+)
+
 DEFAULT_TEMPLATE = {
     'name': 'midnight-agent',
     'anchor_tags': ['midnight'],
     'mutable': {
         'persona_style': '冷静、高效、务实的助手',
         'capabilities': ['记忆', '联想', '执行'],
+        'paths': DEFAULT_PATHS,
+        'evolution': DEFAULT_EVOLUTION,
     },
     'description': '我是 Midnight Skills 的记忆智能体。这是我的身份锚：'
                    '底层身份（自称、身份锚标签、自描述）为定海锚，只读保护；'
@@ -161,8 +180,49 @@ def update_self(agent: str = None, patch: dict | None = None,
     return {'updated': bool(applied), 'rejected': rejected}
 
 
+def add_paths(agent: str = None) -> dict:
+    """给已有 self.md 补 paths。**幂等**：已有非空值则一个字节都不动。
+
+    **自愿动作**——AI 或人显式调用才补，绝不自动跑。
+    自我认知是智能体自己的，第三方不能顺手给它加字段。
+
+    Returns {'added': bool, 'paths': list|str}
+    """
+    if not os.path.exists(get_self_path(agent)):
+        ensure_self(agent)
+        return {'added': True, 'paths': DEFAULT_PATHS}
+
+    data = read_self(agent)
+    existing = (data.get('mutable') or {}).get('paths')
+    if existing:
+        return {'added': False, 'paths': existing}
+
+    update_self(agent, {'paths': DEFAULT_PATHS})
+    return {'added': True, 'paths': DEFAULT_PATHS}
+
+
+def add_evolution(agent: str = None) -> dict:
+    """给已有 self.md 补 evolution。**幂等**：已有非空值则不动。
+
+    与 add_paths 对称：同样是自愿动作，绝不自动跑。
+
+    Returns {'added': bool, 'evolution': str}
+    """
+    if not os.path.exists(get_self_path(agent)):
+        ensure_self(agent)
+        return {'added': True, 'evolution': DEFAULT_EVOLUTION}
+
+    data = read_self(agent)
+    existing = (data.get('mutable') or {}).get('evolution')
+    if existing:
+        return {'added': False, 'evolution': existing}
+
+    update_self(agent, {'evolution': DEFAULT_EVOLUTION})
+    return {'added': True, 'evolution': DEFAULT_EVOLUTION}
+
+
 def main(argv=None) -> int:
-    """CLI: python self_model.py --init [--agent X] | --show [--agent X]"""
+    """CLI: python self_model.py --init | --show | --add-paths | --add-evolution [--agent X]"""
     argv = argv if argv is not None else sys.argv[1:]
     agent = os.environ.get('MIDNIGHT_AGENT')
     action = None
@@ -173,6 +233,10 @@ def main(argv=None) -> int:
             action = 'init'
         elif arg == '--show':
             action = 'show'
+        elif arg == '--add-paths':
+            action = 'add-paths'
+        elif arg == '--add-evolution':
+            action = 'add-evolution'
         elif arg == '--agent' and i + 1 < len(argv):
             agent = argv[i + 1]
             i += 1
@@ -190,8 +254,27 @@ def main(argv=None) -> int:
         data = read_self(agent)
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
+    if action == 'add-paths':
+        try:
+            result = add_paths(agent)
+        except OSError as exc:
+            print(f"写入 self.md 失败：{exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({'status': 'ok', 'added': result['added'],
+                          'path': get_self_path(agent)}, ensure_ascii=False))
+        return 0
+    if action == 'add-evolution':
+        try:
+            result = add_evolution(agent)
+        except OSError as exc:
+            print(f"写入 self.md 失败：{exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({'status': 'ok', 'added': result['added'],
+                          'path': get_self_path(agent)}, ensure_ascii=False))
+        return 0
 
-    print("Usage: self_model.py --init [--agent X] | --show [--agent X]", file=sys.stderr)
+    print("Usage: self_model.py --init | --show | --add-paths | --add-evolution "
+          "[--agent X]", file=sys.stderr)
     return 1
 
 
