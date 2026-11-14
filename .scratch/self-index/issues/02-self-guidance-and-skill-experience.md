@@ -207,9 +207,10 @@ python -m pytest tests/test_self_paths.py tests/test_skill_contract.py -q
 python -m pytest tests -q
 ```
 
-**G1 基线：343 passed / 6 skipped。**
-本 Issue 完成后应为 **355 passed / 6 skipped**（+9 新测试 +3 契约测试 = +12；
-若 `test_skill_contract.py` 的 3 条并入现有文件计数，按实际数字核对，**失败数必须为 0**）。
+**基线不是固定数字。** 开工前先跑一次全量（`python -m pytest tests -q`），
+把当时的 `passed / skipped` 记下来当基线；本 Issue 完成后应为「基线 + 12」，**失败数必须为 0**。
+
+（2026-11-14 在 `feat/self-index` 上的实测是 343 passed / 6 skipped，这只是参考。）
 
 ---
 

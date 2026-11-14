@@ -242,7 +242,10 @@ python -m pytest tests/test_relocatable_paths.py -q
 python -m pytest tests -q
 ```
 
-**G1 基线：343 passed / 6 skipped。** 本 Issue 完成后应 **+17**，失败数必须为 0。
+**基线不是固定数字。** 开工前先跑一次全量（`python -m pytest tests -q`），
+把当时的 `passed / skipped` 记下来当基线；本 Issue 完成后应为「基线 + 17」，**失败数必须为 0**。
+
+（2026-11-14 在 `feat/self-index` 上的实测是 343 passed / 6 skipped，这只是参考。）
 
 ---
 
