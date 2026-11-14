@@ -280,6 +280,66 @@ python -m pytest tests -q
 
 ---
 
+## 实现思路（给执行方）
+
+### 代码怎么组织
+
+一个文件 ~150 行写完。顺序建议：
+
+1. **先写 `scan_longterm`**——纯函数（入路径列表，出 dict），不碰 self.md，最好测
+2. 再写两个私有渲染函数 `_render_identity(identity)` / `_render_longterm(scan)`，各自纯
+3. `compile_boot_manifest` 只做「调两个渲染 → 拼 → 判断要不要加提醒行」
+4. `main` 最后写；参数解析可照 `recall.py` 的 `take_value` 风格（缺值给 Usage，不裸 traceback）
+
+### 陷阱一：类目计数别用 `os.walk(root)`
+
+正确写法是「列直接子目录当类目，各自内部递归计数」：
+
+```python
+for name in sorted(os.listdir(root)):
+    sub = os.path.join(root, name)
+    if not os.path.isdir(sub) or name.startswith('.'):
+        continue
+    count = sum(len(files) for _, _, files in os.walk(sub))
+    categories[name] = count
+```
+
+**不要** `os.walk(root)` 然后按相对路径第一段分组——root 下有散文件时会多出一个假类目，
+或者把散文件错算进某个类目。测试 7 锁这个。
+
+### 陷阱二：缩进别纠结对齐
+
+第二行用 **10 个半角空格**。中文是双宽，视觉上永远差一点——**别去调**。
+测试断言的是字面串 `'          → '`，不是视觉居中对齐。
+
+### 陷阱三：2000 字提醒不能改内容
+
+提醒行是**追加**，不是裁剪。写的时候别顺手 `text[:2000]`——那是另一种错。
+
+```python
+if len(text) > HINT_THRESHOLD:
+    text += f'\n（这份清单已占约 {len(text)} 字。token 和上下文都很宝贵——考虑合并或退休几项。）'
+```
+
+### 测试怎么造数据
+
+不用建真目录树跑 CLI。tmp 里就行：
+
+```python
+longterm = os.path.join(get_agent_dir(agent), 'longterm')
+os.makedirs(os.path.join(longterm, 'tools'))
+open(os.path.join(longterm, 'tools', 'a.py'), 'w').close()   # 空文件够用
+```
+
+扫描只数文件，不读内容。
+
+### 调试先看哪一步
+
+输出不对，**先单独调 `scan_longterm([root])` 打印 dict**——九成问题在这（类目少了 / 计数错）。
+渲染层很薄，通常不会错。
+
+---
+
 ## 验收标准
 
 - [ ] 新增 `skills/recall/scripts/boot.py`，接口与规格逐条一致

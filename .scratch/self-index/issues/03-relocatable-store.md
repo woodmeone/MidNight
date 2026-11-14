@@ -246,6 +246,65 @@ python -m pytest tests -q
 
 ---
 
+## 实现思路（给执行方）
+
+### 顺序：先兼容，再迁移
+
+最容易的错是先写迁移脚本。**先写 `paths.py` 两个纯函数 + ingest 改造**，跑通「新老共存」，
+再写迁移。兼容是刚需，迁移是锦上添花。
+
+### 陷阱一：重复插入（本 Issue 最贵的错）
+
+ingest 靠 checksum 查重，幂等。改成存相对路径后，若只用相对路径查老库（存的是绝对），
+查不到 → 当新文件 → **同一篇日记插两次**。
+
+**先写测试 8 让它红，再改代码。** 手工构造：
+
+```python
+# 手动插一行老格式
+conn.execute("INSERT INTO files (file_path, diary_name, checksum, diary_date) VALUES (?,?,?,?)",
+             (os.path.abspath(fp), 'default', 'x', '2026-11-14'))
+# 再正常 ingest 同一个文件
+ingest_file(fp, db_path, client)
+# 断言 files 只有 1 行
+```
+
+### 陷阱二：`db_path` 可能是裸相对路径
+
+`recall.py` 支持 `--db recall.db`。这时：
+
+```python
+os.path.dirname('recall.db')              # → ''    ✗ 错
+os.path.dirname(os.path.abspath('recall.db'))   # → 当前工作目录  ✓ 对
+```
+
+`resolve_file_path` 里**必须先 `abspath` 再 `dirname`**。
+
+### 陷阱三：备份撞名
+
+```python
+shutil.copy2(db_path, db_path + '.bak-' + datetime.now().strftime('%Y%m%d%H%M%S'))
+```
+
+同一秒跑两次会撞同名文件。**复制前先检查目标是否存在**，存在就加序号。
+
+### 测试 16（搬迁往返）怎么写
+
+```python
+# 建库 → 入库若干日记 → shutil.copytree 整个 agent 目录到新路径
+# 对新路径的 recall.db 调 timeline_recall
+# 断言返回内容与原文一致
+```
+
+这条最接近真实场景。它绿了，基本就敢交付。
+
+### 别碰 chunk
+
+迁移只 `UPDATE files.file_path`。测试 17（`chunks.content` 全表哈希不变）写完，
+心里就有底了——它绿的，说明你没误伤正文。
+
+---
+
 ## 验收标准
 
 - [ ] `scripts/paths.py` 两个纯函数，行为与规格逐条一致

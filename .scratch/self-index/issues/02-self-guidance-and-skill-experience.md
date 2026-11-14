@@ -213,6 +213,47 @@ python -m pytest tests -q
 
 ---
 
+## 实现思路（给执行方）
+
+### 先写测试 3，再写代码
+
+最容易犯的错是让 `ensure_self` 变聪明——顺手给它加"字段缺失就补"。
+那样所有老用户的 self.md 会被悄悄改写，自我认知被第三方动过。
+
+**先把 `test_init_does_not_touch_existing_self` 写出来让它红**，再动手。
+红不了说明你误解了这条要求。
+
+### `add_paths` 就四行
+
+```python
+data = read_self(agent)
+existing = (data.get('mutable') or {}).get('paths')
+if existing:
+    return {'added': False, 'paths': existing}
+update_self(agent, {'paths': DEFAULT_PATHS})
+return {'added': True, 'paths': DEFAULT_PATHS}
+```
+
+注意 `update_self` 返回 `{'updated': bool, 'rejected': [...]}`，**不返回 paths**，要自己拼返回结构。
+
+### 陷阱：paths 可能是列表也可能是字符串
+
+`_parse_self` 里 `mutable` 来自 `json.loads`，所以 `paths` 两种类型都可能出现。
+判空一律 `if existing:`（空列表和空串都 falsy），不要写 `is not None`。
+
+### 契约测试怎么加
+
+`test_skill_contract.py` 已有 `REPO_ROOT` 和 `_read()`，照现有风格加函数就行。
+断言的是**不可省的句子**，不是措辞优美——所以锚「skill经验」「踩坑」「不打分」这类关键词，
+别人想删一句就得先删测试。
+
+### 文档章节别写长
+
+「能力经验」这一节的目的只有一个：**让它记得把坑记下来**。
+写三行就够。写成一份制度文件，它会跳过。
+
+---
+
 ## 验收标准
 
 - [ ] `DEFAULT_PATHS` 常量存在，两句文案与规格一致
