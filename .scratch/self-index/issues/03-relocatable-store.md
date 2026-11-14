@@ -1,6 +1,6 @@
 # 03 — 记忆库可迁移（路径相对化）
 
-Spec: `../spec.md` ｜ Blocked by: 无 ｜ 分支: `feat/self-index`
+Issue: #11 ｜ Spec: `../spec.md` ｜ Blocked by: 无 ｜ 分支: `feat/self-index`
 
 ## 用户故事
 

@@ -1,6 +1,6 @@
 # 01 — 开机清单生成器（boot manifest）
 
-Spec: `../spec.md` ｜ Blocked by: 无 ｜ 分支: `feat/self-index`
+Issue: #9 ｜ Spec: `../spec.md` ｜ Blocked by: 无 ｜ 分支: `feat/self-index`
 
 ## 用户故事
 

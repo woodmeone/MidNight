@@ -2,6 +2,17 @@
 
 > 一句话：**开机只给「我是谁 + 我有什么资产」。能力靠记，同伴靠问，资产靠扫。**
 
+## Issue 索引
+
+| Issue | 票据文件 | 内容 | 碰数据 |
+|---|---|---|---|
+| [#9](../../../issues/9) | `issues/01-boot-manifest.md` | 开机清单生成器 `boot.py` | 只读 |
+| [#10](../../../issues/10) | `issues/02-self-guidance-and-skill-experience.md` | self.md 路径指路 + 能力经验约定 | 只改 self.md |
+| [#11](../../../issues/11) | `issues/03-relocatable-store.md` | 记忆库路径相对化 | `UPDATE files.file_path` |
+
+分支：`feat/self-index`（从 `develop` 拉出，`develop` 从 `main` 拉出）。
+
+
 ## 问题
 
 智能体每次开工是空白的。它手里其实攒着三样自己的东西——人设、资产、记忆——但会话第一条它一个都看不见。
