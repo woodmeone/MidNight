@@ -269,7 +269,7 @@ fixture 照抄 `tests/test_session_start.py`（`cfg.BASE_DIR = tmp`）+ 用 `Fak
 | 11 | `test_cli_stale_output_format` | stdout 含 `[久未引用]`、`最后提及`、`建议` |
 | 12 | `test_cli_missing_dir_message` | 目录不存在 → 含 `不可用`，退出码 0 |
 | 13 | `test_cli_readonly` | 跑前后 `recall.db` checksum 不变 |
-| 14 | `test_contract_skill_md_has_evolution_section` | `SKILL.md` 含 `## 长期内容的维护`、`想长期留下来的`、`token 很贵`、`收尾那一刻`、`要人点头` |
+| 14 | `test_contract_skill_md_has_evolution_section` | `SKILL.md` 含 `## 长期内容的维护`、`想长期留下来的`、`token 和上下文很宝贵`、`收尾那一刻`、`要人点头` |
 
 第 **14** 条是契约测试，锁住这四块不能被人「顺手简化」掉。
 
