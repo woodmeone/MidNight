@@ -290,3 +290,53 @@ def test_closing_question_not_action_only(skill):
         '收尾问句必须问「哪些东西」——「动作」只覆盖重新做，漏掉重新想'
     )
     assert '哪些动作' not in segment, '收尾问句又缩回「动作」了'
+
+
+# ============================================================
+# 8. 开机流程（Issue #19）——boot.py 必须进流程
+# ============================================================
+
+def test_skill_md_teaches_boot_on_session_start(skill):
+    """触发条件表里必须出现 boot.py —— 否则它造好也没人跑。"""
+    marker = '## 触发条件'
+    assert marker in skill
+    start = skill.index(marker)
+    segment = skill[start:start + 1800]      # 触发条件那一节
+
+    assert 'boot.py' in segment, (
+        '触发条件表没教开机跑 boot.py——能力有了但接不上，等于没有'
+    )
+    assert '会话第一条' in segment or '开机' in segment, '触发条件表缺「开机」这一行'
+
+
+def test_skill_md_has_boot_order_section(skill):
+    """必须有「开机顺序」一节，讲清 boot 与 prep 的分工。"""
+    assert '## 开机顺序' in skill
+    start = skill.index('## 开机顺序')
+    segment = skill[start:start + 1200]
+
+    assert 'boot.py' in segment
+    assert 'prep.py' in segment
+
+
+def test_skill_md_states_boot_once(skill):
+    """必须明写 boot.py 只跑一次，防有人把它加进「每次回复前」，每轮烧一遍。
+
+    断言锚在**分工表那一行**，不锚「一次」二字——标题里也有「一次」，
+    只查博字符串会被标题自己满足，测试就废了。
+    """
+    assert '| `boot.py` |' in skill, '分工表缺 boot.py 那一行'
+    for line in skill.splitlines():
+        if line.startswith('| `boot.py`'):
+            assert '一次' in line, (
+                f'分工表里 boot.py 那行必须明写「一次」：{line!r}'
+            )
+            break
+
+    # 反面：不许把 boot.py 和「每次回复前」绑在一起。
+    # 只查表行（以 | 开头）——正文那句「每次回复前，先查一下记忆」是讲召回，不涉及 boot。
+    for line in skill.splitlines():
+        if line.startswith('|') and '每次回复前' in line:
+            assert 'boot.py' not in line, (
+                f'boot.py 不许出现在「每次回复前」——会每轮重烧开机清单：{line!r}'
+            )
