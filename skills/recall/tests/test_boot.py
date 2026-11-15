@@ -422,6 +422,89 @@ def test_check_ignores_prose_slash(agent):
     assert check_index_paths(_longterm(agent)) == []
 
 
+# ============================================================
+# 票 #16：paths 要被显示出来
+# ============================================================
+
+def test_identity_shows_paths_hint(agent):
+    """self.md 有 paths → 含固定占位串"""
+    ensure_self(agent)   # DEFAULT_TEMPLATE 自带 paths
+    os.makedirs(_longterm(agent))
+
+    out = compile_boot_manifest(agent)
+    first = out.splitlines()[0]
+
+    assert '路径:先查技能库·有事问同伴' in first
+
+
+def test_identity_omits_paths_when_absent(agent):
+    """无 paths → 不含 `路径:`，且不留空 `｜`"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {'persona_style': '克制'},
+        'description': 'x',
+    })
+    os.makedirs(_longterm(agent))
+
+    first = compile_boot_manifest(agent).splitlines()[0]
+
+    assert '路径:' not in first
+    assert not first.endswith('｜')
+    assert '｜｜' not in first
+
+
+def test_paths_hint_is_fixed_string(agent):
+    """无论 paths 内容多长，输出里都是那句固定串（不截取内容）"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {
+            'paths': ['这是一条极长的路径说明' * 50],
+        },
+        'description': 'x',
+    })
+    os.makedirs(_longterm(agent))
+
+    first = compile_boot_manifest(agent).splitlines()[0]
+
+    assert '路径:先查技能库·有事问同伴' in first
+    assert '极长的路径说明' not in first     # 不展开内容
+
+
+def test_show_paths_prints_full_content(agent, capsys):
+    """--show-paths 打印 paths 原文"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {'paths': ['第一句指路', '第二句指路']},
+        'description': 'x',
+    })
+
+    rc = main(['--identity', agent, '--show-paths'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '第一句指路' in out
+    assert '第二句指路' in out
+
+
+def test_show_paths_absent(agent, capsys):
+    """无 paths → 明确说未设置，退 0"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {},
+        'description': 'x',
+    })
+
+    rc = main(['--identity', agent, '--show-paths'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '未设置' in out
+
+
 def test_identity_omits_missing_style_and_boundary(agent):
     """style / boundary 缺失时整段省略，不留空 `｜`"""
     ensure_self(agent, defaults={

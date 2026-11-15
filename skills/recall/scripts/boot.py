@@ -33,6 +33,10 @@ INDEX_FILENAME = 'LONGTERM.md'
 # 这是镜子，不是闸门：取舍权在智能体手里。
 HINT_THRESHOLD = 2000
 
+# Issue #16：paths 在开机清单里的**固定占位串**。
+# 只承担「提醒有这两条路」的职责；具体去哪、问谁，读 self.md。
+PATHS_HINT = '路径:先查技能库·有事问同伴'
+
 # 第二行的缩进。中文是双宽，视觉上永远差一点，别去调对齐。
 _INDENT = ' ' * 10
 
@@ -87,24 +91,32 @@ def scan_longterm(roots: list) -> dict:
     }
 
 
+def _identity_parts(identity: str) -> list:
+    """人设段的各个片段（供清单与 --show-paths 共用，避免两处漂移）。"""
+    data = read_self(identity) or {}
+    name = data.get('name') or identity
+    mutable = data.get('mutable') or {}
+
+    parts = [f'[开机] 我是{name}']
+    if mutable.get('persona_style'):
+        parts.append(mutable['persona_style'])
+    if mutable.get('boundary'):
+        parts.append(f"边界:{mutable['boundary']}")
+    # Issue #16：paths 已写进 self.md 却从没显示出来，等于没写。
+    # 这里只放**固定占位串**，不展开内容——paths 是长句（还可能带路径），
+    # 动态截取必产出半句。细节让它自己去 read self.md。
+    if mutable.get('paths'):
+        parts.append(PATHS_HINT)
+    return parts
+
+
 def _render_identity(identity: str) -> str:
-    """第一块：`[开机] 我是{name}｜{style}｜边界:{boundary}`。
+    """第一块：`[开机] 我是{name}｜{style}｜边界:{boundary}｜{paths 占位}`。
 
     缺失的段整段省略（连 `｜` 一起），不留空分隔符。
     self.md 不存在时降级为 `[开机] 我是{identity}`，不报错。
     """
-    data = read_self(identity) or {}
-    name = data.get('name') or identity
-    mutable = data.get('mutable') or {}
-    style = mutable.get('persona_style') or ''
-    boundary = mutable.get('boundary') or ''
-
-    parts = [f'[开机] 我是{name}']
-    if style:
-        parts.append(style)
-    if boundary:
-        parts.append(f'边界:{boundary}')
-    return '｜'.join(parts)
+    return '｜'.join(_identity_parts(identity))
 
 
 def _render_longterm(scan: dict) -> str:
@@ -266,6 +278,7 @@ def main(argv=None) -> int:
     workspace = None
     check = False
     strict = False
+    show_paths = False
 
     i = 0
     while i < len(argv):
@@ -278,14 +291,28 @@ def main(argv=None) -> int:
             check = True; i += 1
         elif arg == '--strict':
             strict = True; i += 1
+        elif arg == '--show-paths':
+            show_paths = True; i += 1
         else:
             print(f'Unknown option: {arg}', file=sys.stderr)
             return 2
 
     if not identity:
         print('Usage: boot.py --identity NAME [--workspace PATH] '
-              '[--check [--strict]]', file=sys.stderr)
+              '[--check [--strict]] [--show-paths]', file=sys.stderr)
         return 2
+
+    if show_paths:
+        # 展开 paths 全文——只给调试/体检用，不进开机清单（会占上下文）。
+        paths = (read_self(identity) or {}).get('mutable', {}).get('paths')
+        if not paths:
+            print('[路径] 未设置。可用 self_model.py --add-paths 补上。')
+            return 0
+        items = paths if isinstance(paths, list) else [paths]
+        print('[路径] self.md 里的 paths 全文：')
+        for item in items:
+            print(f'  - {item}')
+        return 0
 
     if check:
         # 检查哪个根？与清单同口径：工作区优先，其次 agent 的 longterm。
