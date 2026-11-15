@@ -10,8 +10,21 @@
 | [#10](https://github.com/woodmeone/MidNight/issues/10) | `issues/02-self-guidance-and-skill-experience.md` | self.md 路径指路 + 能力经验约定 | 只改 self.md |
 | [#11](https://github.com/woodmeone/MidNight/issues/11) | `issues/03-relocatable-store.md` | 记忆库路径相对化 | `UPDATE files.file_path` |
 | [#12](https://github.com/woodmeone/MidNight/issues/12) | `issues/04-longterm-self-evolution.md` | 长期内容的自进化闭环 | 只读 |
+| [#14](https://github.com/woodmeone/MidNight/issues/14) | `issues/05-relative-longterm-paths.md` | 长期内容路径相对化（修 #9） | 只读 |
+| [#15](https://github.com/woodmeone/MidNight/issues/15) | `issues/06-path-portability-tiers.md` | 路径可移植性三级判据 + 全库体检 | 只读 |
+| [#16](https://github.com/woodmeone/MidNight/issues/16) | `issues/07-paths-visibility.md` | paths 要被显示出来（修 #10） | 只读 |
 
-依赖：#12 依赖 #9（复用扫描）与 #10（同改 `DEFAULT_TEMPLATE`）。#11 独立。
+依赖：#12 依赖 #9、#10；#14 依赖 #9；#15 依赖 #14；#16 依赖 #10。#11 独立。
+
+## 路径可移植性：三级判据
+
+| 档 | 例子 | 该写成 |
+|---|---|---|
+| `inside` | `C:\...\recall\kaka\longterm\` | `longterm/` |
+| `home` | `C:\Users\X\.dsh\skills` | `~/.dsh/skills` |
+| `external` | `D:\Project\Other` | 保留绝对，标外部真源 |
+
+判据一句话：**这段路径跟着谁搬家？** 跟着 agent → 相对；跟着账户 → `~`；跟着别的项目 → 绝对。
 
 分支：`feat/self-index`（从 `develop` 拉出，`develop` 从 `main` 拉出）。
 
