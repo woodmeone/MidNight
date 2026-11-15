@@ -217,7 +217,7 @@ def classify_path(path: str, agent_dir: str) -> str | None:
     """返回 'inside' | 'home' | 'external' | None（不需要判级）。
 
     **已经是 `~/` 写法的直接返回 None**——它本来就跟着账户走，是可移植的，
-    报出来只会制造噪音（实测里 `~/.agents/skills` 被误报成「可改进」）。
+    报出来只会制造噪音（实测里 `~/` 开头的写法被误报成「可改进」）。
     """
     if not path:
         return None

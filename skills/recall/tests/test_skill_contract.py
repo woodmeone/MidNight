@@ -248,3 +248,45 @@ def test_skill_md_description_of_session_start_cli(skill):
     for line in skill.splitlines():
         if 'session_start' in line and '200' in line:
             pytest.fail(f'session_start 描述已过期（实现早改成不截断）：{line!r}')
+
+
+# ============================================================
+# 7. 概念校准（Issue #18）——反向锁
+# ============================================================
+
+# 技能库位置是 harness 运行时事实，不是文档能规定的常量。
+# 写死具体路径，换 harness 照抄就错。
+HARDCODED_SKILL_PATHS = ('.dsh/skills', '.agents/skills', '.dsh\\skills', '.agents\\skills')
+
+
+def test_skill_md_no_hardcoded_skill_path(skill):
+    """SKILL.md 不得把某个 harness 的技能库路径当范例写死。"""
+    for name in HARDCODED_SKILL_PATHS:
+        assert name not in skill, (
+            f'SKILL.md 写死了技能库路径 {name!r}。\n'
+            f'技能库在哪是 harness 运行时告诉的，不同 harness 不一样。'
+        )
+
+
+def test_context_no_hardcoded_skill_path():
+    """CONTEXT.md 同样不许写死。"""
+    text = _read(CONTEXT)
+    for name in HARDCODED_SKILL_PATHS:
+        assert name not in text, f'CONTEXT.md 写死了技能库路径 {name!r}'
+
+
+def test_closing_question_not_action_only(skill):
+    """收尾问句必须问「东西」，不能缩回「动作」。
+
+    「动作」只覆盖「重新做」（工具/模板/清单），漏掉「重新想」（范式/结论/图例）。
+    """
+    # 定位收尾那一刻那一段
+    marker = '收尾那一刻'
+    assert marker in skill, '收尾触发点不见了'
+    start = skill.index(marker)
+    segment = skill[start:start + 400]
+
+    assert '哪些东西' in segment, (
+        '收尾问句必须问「哪些东西」——「动作」只覆盖重新做，漏掉重新想'
+    )
+    assert '哪些动作' not in segment, '收尾问句又缩回「动作」了'
