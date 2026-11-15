@@ -17,6 +17,7 @@ from scripts.config import (  # noqa: E402
     get_db_path, list_agents, DEFAULT_AGENT, ensure_agent,
 )
 from scripts.ngrams import candidate_grams  # noqa: E402
+from scripts.paths import resolve_file_path, resolve_from_conn  # noqa: E402
 from scripts.cache import _cache_key, cache_get, cache_set  # noqa: E402
 from scripts.ledger import (  # noqa: E402
     DEFAULT_AUDIT_LIMIT,
@@ -145,7 +146,7 @@ def recall(query: str, db_path: str, embedding_client, k: int = 10,
                 'chunk_id': row['id'],
                 'content': row['content'],
                 'date': row['date'][:10] if row['date'] else '',
-                'file_path': row['file_path'],
+                'file_path': resolve_file_path(db_path, row['file_path']),
                 'score': score,
                 'importance': row['importance'] or 'medium',
                 'access_count': row['access_count'] or 0,
@@ -474,7 +475,7 @@ def timeline_recall(db_path: str, k: int = 5, since: str = None,
                 'content': '\n\n'.join(r['content'] for r in rows),
                 'date': f['date'],
                 'score': 1.0,          # 时间轴不产出相关度；保留字段以统一下游
-                'file_path': f['file_path'],
+                'file_path': resolve_file_path(db_path, f['file_path']),
                 'importance': rows[0]['importance'] or 'medium',
             })
         return out
@@ -514,7 +515,7 @@ def literal_recall(db_path: str, text: str, k: int = 10, since: str = None,
                     'content': r['content'],
                     'date': r['date'],
                     'score': 1.0,
-                    'file_path': r['file_path'],
+                    'file_path': resolve_file_path(db_path, r['file_path']),
                     'importance': r['importance'] or 'medium',
                     'chunk_indexes': [r['chunk_index']],
                 }
@@ -662,7 +663,7 @@ def expand_tag_candidates(conn, activated, strength_map, seen, tag_weight,
             'chunk_id': meta['id'],
             'content': meta['content'],
             'date': date_str,
-            'file_path': meta['file_path'],
+            'file_path': resolve_from_conn(conn, meta['file_path']),
             'score': tag_weight * tag_strength + time_ratio * ts,
             'importance': meta['importance'] or 'medium',
             'access_count': meta['access_count'] or 0,

@@ -21,13 +21,15 @@ recall 内部模块分工：
 | 文件 | 职责 |
 |---|---|
 | `prep.py` | 可移植核心：门控→取 query→召回→去重→MMR→预算→格式化文本；薄 CLI |
+| `boot.py` | 开机清单：扫长期内容类目 + 人设摘要，**不裁剪**；三级加载的第一级 |
 | `recall.py` | 联想主干：向量 KNN + 标签脉冲合并 + 时间加权 + tag-first 扩增 + `mmr_rerank` + 反馈强化 `feedback_reward`；**约束**：时间窗（`since`/`until`，压候选池 + 标签扩增 + 缓存键）、字面（`literal_recall`）；退化形态 `timeline_recall`（库内直查，不碰 md） |
 | `ledger.py` | 检索留痕：`append_entry` / `read_entries` / `format_entries`，写失败静默（旁路），一 agent 一 `retrieval_ledger.jsonl` |
 | `tag_network.py` | 标签方向边 + 脉冲传播（压缩/枢纽降温/Core-Ghost 门控/多尺度线索提取） |
 | `embedding.py` | 嵌入客户端三后端：本地 bge-m3 ONNX / SiliconFlow API / Fake（离线兜底），三级模型自动解析 |
 | `ingest.py` / `schema.py` | 日记切块入库 / SQLite schema |
-| `self_model.py` / `evolution.py` | self 锚（定海锚只读 + 可动层）/ 自进化与久不用衰减 |
-| `session_start.py` / `maintenance.py` / `reembed.py` | 首轮身份摘要 / 孤儿数据迁移 / 非破坏式重嵌入 |
+| `paths.py` | 可迁移路径：`stored_path`（存相对/正斜杠）/ `resolve_file_path`（读时还原，老绝对路径兼容） |
+| `self_model.py` / `evolution.py` | self 锚（定海锚只读 + 可动层，含 paths/evolution 路径指路）/ 自进化与久不用衰减 |
+| `session_start.py` / `maintenance.py` / `reembed.py` | 首轮身份摘要 / 孤儿数据迁移与 `--relativize-paths` / 非破坏式重嵌入 |
 | `cache.py` / `ngrams.py` / `config.py` | 召回结果缓存 / 倒排 n-gram / agent 物理隔离路径 |
 
 ## 核心业务流程
@@ -37,6 +39,13 @@ recall 内部模块分工：
 3. **身份隔离**：显式 `--identity/--agent` = 确定性查自己区（声明即自动开户）；`--auto` 仅兜底，非 default 需词面锚定 ≥2 字才可选，防跨区泄漏。
 4. **检索 = 一条主干 + 两个约束**（ADR-0003，修订 ADR-0002 的"三通道"表述）：主干是联想排序（向量 KNN + 标签脉冲 + 时间加权 + tag-first 扩增）；约束是**时间窗**（`--since/--until`，闭区间，压在候选池与标签扩增两处，且参与缓存键）与**字面**（`--literal`，`LIKE` 转义）。约束在候选池阶段过滤，主干在其内排序——"十月以后关于备课的"一次调用即可。`--timeline` 是约束的退化形态（只要时间顺序、不要语义排序）。`dailynote/*.md` 只作 ingest 源，**永不作检索目标**，只有用户显式授权才可读原文。每次 CLI 检索追加一行留痕（含窗口），`--audit` 反查。
 5. **自我模型**：`self_model.py --init` 首建 self 锚；`evolution.py --apply` 只改可动层，定海锚字段拒绝；`--decay` 压冷边。
+6. **开机**：`boot.py --identity <名字> [--workspace <工作区>]` → 人设摘要 + 长期内容类目索引。
+   **会话第一条，一次**（不是每轮——每轮跑会白烧 context）。
+   长期内容归文件系统（扫目录，不进库），三级加载：一行类目 → `LONGTERM.md` → 具体文件。
+   **能力与同伴不进清单**——它们是外面给的，`self.md` 写一句指路，经验靠日记沉淀。
+   没有 harness hook 时只能靠 `SKILL.md` 的纪律，有 hook 挂 hook 更可靠。
+7. **维护**：长期内容由智能体自己判断收/改/退休。触发是三个时刻（建时 / 收尾 / 索引指空），
+   不是定期。**系统只给意识不给判据**——不设准入标准、不设字数上限（挤了它自己会合并）。
 
 ## 关键数据结构
 
@@ -45,6 +54,7 @@ recall 内部模块分工：
 - `recall.db`（SQLite）：`files`（日记源）、`chunks`（切块 + vector BLOB + importance + access_count）、`tags`（+vector）、`chunk_tags`、`tag_cooccurrence`（无向共现）、`tag_edges`（方向边，脉冲传播底座）、`chunk_ngrams`（倒排预筛）、`meta`、`recall_cache`
 - `agent.json`：身份（description + keywords，list_agents 依据）
 - `dailynote/`：日记 md 源文件（真相源，永不删；**不是检索索引**，见 ADR-0002）
+- `longterm/`：长期内容（可选）。**目录不是表**——扫出来的是类目与计数，正文永远在文件系统里
 - `retrieval_ledger.jsonl`：检索留痕（一行一次检索：ts/agent/channel/query/hits/chunk_ids/extra，extra 含 `since`/`until`），`--audit` 读取
 - `self.md`：自我锚（frontmatter 含 read_only 定海锚）
 
@@ -53,6 +63,11 @@ recall 内部模块分工：
 - **记忆物理隔离**：一区一库，跨区读写禁止；auto 猜库不得戳破隔离墙。
 - **检索只走库**（ADR-0002）：检索索引唯一载体是 `recall.db`；`dailynote/*.md` 只作 ingest 源，禁止作为检索回退路径；确定性通道必须显式带身份，不许静默落到 env/default 库。
 - **非破坏铁律**：任何维护/演化操作只 UPDATE 既有字段与边，绝不删除、重建、重灌记忆数据；动真实库前先备份。
+- **路径相对化**：`files.file_path` 存相对 agent 目录的路径（正斜杠），库里不存盘符与用户名；
+  读侧用 `isabs` 判定，老绝对路径兼容（零迁移也能跑）。
+  **三处载体三级判据**：`self.md` / `agent.json` / `LONGTERM.md` 里的路径按
+  `inside`（写相对）/ `home`（写 `~/`）/ `external`（保留绝对）分档。
+  自查：`boot.py --check`（`--strict` 进 CI，`--all` 全库）。**只报不改**。
 - **定海锚只读**：self 的 name/anchor_tags/description 改写被拒，防跑飞。
 - **零外部服务**：Python + SQLite 标准库自包含；embedding 默认本地 bge-m3 ONNX（1024 维，三级模型解析），无模型无 key 时 Fake 兜底可离线跑。
 - **默认关闭新行为**：多尺度、MMR、深联想等能力开关默认关闭，关闭时逐位等于旧行为。
@@ -60,7 +75,7 @@ recall 内部模块分工：
 
 ## 当前支持功能（一行清单）
 
-- recall：日记入库 / 联想主干（脉冲传播+枢纽降温+Core-Ghost+多尺度+MMR）/ 约束（时间窗+字面）/ 时间轴退化形态 / 检索留痕与 `--audit` 审计 / 身份隔离与 auto 兜底 / 检索反馈强化 / 倒排预筛与结果缓存 / 本地 ONNX 真向量化与非破坏重嵌入 / self 锚与自进化 / 孤儿数据迁移 / 首轮上下文轻编译
+- recall：日记入库 / 联想主干（脉冲传播+枢纽降温+Core-Ghost+多尺度+MMR）/ 约束（时间窗+字面）/ 时间轴退化形态 / 检索留痕与 `--audit` 审计 / 身份隔离与 auto 兜底 / 检索反馈强化 / 倒排预筛与结果缓存 / 本地 ONNX 真向量化与非破坏重嵌入 / self 锚与自进化 / 孤儿数据迁移 / 首轮上下文轻编译 / **开机清单（扫长期内容，不裁剪）** / **长期内容自我维护约定** / **路径相对化与 `--relativize-paths`**
 - core：跨端事实时间线 append / merge（时间戳 + 去重）
 - pulse：`[[Pulse::*]]` 心跳协议自主续命
 - compass：语义模型路由 + 主模型容灾降级
