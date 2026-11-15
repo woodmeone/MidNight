@@ -13,8 +13,11 @@
 | [#14](https://github.com/woodmeone/MidNight/issues/14) | `issues/05-relative-longterm-paths.md` | 长期内容路径相对化（修 #9） | 只读 |
 | [#15](https://github.com/woodmeone/MidNight/issues/15) | `issues/06-path-portability-tiers.md` | 路径可移植性三级判据 + 全库体检 | 只读 |
 | [#16](https://github.com/woodmeone/MidNight/issues/16) | `issues/07-paths-visibility.md` | paths 要被显示出来（修 #10） | 只读 |
+| [#17](https://github.com/woodmeone/MidNight/issues/17) | `issues/08-doc-implementation-alignment.md` | SKILL.md 与实现对齐（文档纠错） | 只读 |
+| [#18](https://github.com/woodmeone/MidNight/issues/18) | `issues/09-concept-calibration.md` | 概念校准（动作漂移 + 写死路径） | 只读 |
+| [#19](https://github.com/woodmeone/MidNight/issues/19) | `issues/10-boot-in-flow.md` | 开机流程接入 boot.py | 只读 |
 
-依赖：#12 依赖 #9、#10；#14 依赖 #9；#15 依赖 #14；#16 依赖 #10。#11 独立。
+依赖：#12→#9,#10；#14→#9；#15→#14；#16→#10；#19→#9。#11 / #17 / #18 独立。
 
 ## 路径可移植性：三级判据
 
