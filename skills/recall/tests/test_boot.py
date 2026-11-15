@@ -306,16 +306,30 @@ def test_cli_prints_manifest(agent, capsys):
 # ============================================================
 
 def test_check_finds_windows_drive(agent):
-    """索引里写 D:\\x\\a.py → 被抓出来"""
+    """root 内的绝对路径 → kind='inside'，必须修"""
     _self(agent)
+    inside = os.path.join(_longterm(agent), 'tools', 'b.py')
     _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
-            '# 索引\n- tools/a.py\n- D:\\Project\\ws\\tools\\b.py\n')
+            f'# 索引\n- tools/a.py\n- {inside}\n')
 
     findings = check_index_paths(_longterm(agent))
 
     assert len(findings) == 1
     assert findings[0]['line'] == 3
-    assert 'D:\\Project' in findings[0]['text']
+    assert findings[0]['kind'] == 'inside'
+    assert 'b.py' in findings[0]['path']
+
+
+def test_check_outside_root_is_advisory(agent):
+    """root 外的绝对路径 → kind='outside'，不算必须修（外部真源指路）"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- D:\\OtherProject\\src\n- C:\\Users\\me\\skills\n')
+
+    findings = check_index_paths(_longterm(agent))
+
+    assert len(findings) == 2
+    assert all(f['kind'] == 'outside' for f in findings)
 
 
 def test_check_finds_posix_absolute(agent):
@@ -327,7 +341,7 @@ def test_check_finds_posix_absolute(agent):
     findings = check_index_paths(_longterm(agent))
 
     assert len(findings) == 1
-    assert '/home/' in findings[0]['text']
+    assert '/home/' in findings[0]['path']
 
 
 def test_check_finds_file_protocol(agent):
@@ -359,25 +373,36 @@ def test_check_missing_index(agent):
 
 
 def test_check_cli_reports_and_exit_zero(agent, capsys):
-    """--check 有问题时退出码 0（这是检查不是断言），输出含行号"""
+    """--check 默认退出码 0（这是检查不是断言），输出含行号"""
     _self(agent)
-    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
-            '- D:\\x\\a.py\n')
+    inside = os.path.join(_longterm(agent), 'tools', 'b.py')
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), f'- {inside}\n')
 
     rc = main(['--identity', agent, '--check'])
     out = capsys.readouterr().out
 
     assert rc == 0
     assert '路径检查' in out
-    assert 'D:\\x\\a.py' in out
+    assert '第 1 行' in out
 
 
 def test_check_strict_exit_one(agent):
-    """--check --strict 有问题 → 退出码 1"""
+    """--check --strict + root 内有绝对路径 → 退出码 1"""
     _self(agent)
-    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), '- D:\\x\\a.py\n')
+    inside = os.path.join(_longterm(agent), 'tools', 'b.py')
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), f'- {inside}\n')
 
     assert main(['--identity', agent, '--check', '--strict']) == 1
+
+
+def test_check_strict_ignores_outside(agent):
+    """--strict 不因外部真源指路而失败（那是合理写法）"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- D:\\OtherProject\\src\n')
+
+    rc = main(['--identity', agent, '--check', '--strict'])
+    assert rc == 0
 
 
 def test_check_strict_clean_exit_zero(agent):
@@ -386,6 +411,15 @@ def test_check_strict_clean_exit_zero(agent):
     _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), '- tools/a.py\n')
 
     assert main(['--identity', agent, '--check', '--strict']) == 0
+
+
+def test_check_ignores_prose_slash(agent):
+    """「和/或」这类不误判成 POSIX 绝对路径"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- 读和/或写都要走库\n- 客户/供应商两边都记\n')
+
+    assert check_index_paths(_longterm(agent)) == []
 
 
 def test_identity_omits_missing_style_and_boundary(agent):

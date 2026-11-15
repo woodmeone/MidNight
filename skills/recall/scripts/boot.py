@@ -135,22 +135,64 @@ def _render_longterm(scan: dict) -> str:
     return '\n'.join(lines)
 
 
-# --- Issue #14：索引里的绝对路径检查 -------------------------------------
+# --- Issue #14：索引里的路径检查 -----------------------------------------
 #
-# 检查只报不改：改不改是智能体自己的决定。发现问题时退出码仍为 0（这是检查，
-# 不是断言失败）；要进 CI 用 --strict。
-_ABS_PATTERNS = (
-    re.compile(r'[A-Za-z]:[\\/]'),          # Windows 盘符 C:\ / D:/
-    re.compile(r'file://'),                 # file:// 协议
-)
-# POSIX 绝对：行内以 / 开头，且后面跟路径分隔——避免把「和/或」这类误判
-_POSIX_ABS = re.compile(r'(?:^|[\s`(\[])(/[A-Za-z0-9_.\-]+/+)')
+# 检查只报不改：改不改是智能体自己的决定。
+#
+# **核心区分**（这条比「有没有绝对路径」重要得多）：
+#
+#   - 指向 root **内部**却写成绝对 → **错误**，必须改成相对（这才是搬机器会断的）
+#   - 指向 root **外部**的绝对路径   → **提示**，当前写法是对的（另一个盘没法写相对），
+#                                      只是迁移后需要重新指路
+#
+# 只按「有绝对路径」一刀切会误伤「外部真源指路」——那种索引一旦被当成噪音，
+# 检查器就会被无视。
+_CJK = re.compile(r'[\u4e00-\u9fff]')
+# Windows 盘符：D:\... 或 C:/...
+_WIN_TOKEN = re.compile(r'[A-Za-z]:[\\/][^\s`\'"|)\]}，。、；：]*')
+# POSIX 绝对：**必须有左边界**（行首/空白/反引号/括号），且至少两段。
+# 没有左边界就会把 `new/list/...` 这类正文斜杠当成路径。
+# `~/.agents/skills` 故意不匹配——`~` 不是边界字符，而它本身就是可移植的。
+_POSIX_TOKEN = re.compile(
+    r'(?:^|[\s`(\[{|,，])/(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+/?')
+
+
+def _abs_tokens(line: str) -> list:
+    """从一行里抠出绝对路径候选。宁缺勿滥——正文里的斜杠不算。"""
+    tokens = []
+    for pat in (_WIN_TOKEN, _POSIX_TOKEN):
+        for m in pat.finditer(line):
+            token = m.group(0).strip()
+            # 去掉可能被一起吞掉的前导边界字符
+            token = token.lstrip('`([{|,，').strip()
+            token = token.rstrip('.,;:）)】]，。、；：')
+            if token.startswith('file://'):
+                token = token[len('file://'):]
+            if not token or _CJK.search(token):
+                continue
+            if token.startswith('/') and token.count('/') < 2:
+                continue
+            if token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def _is_inside(path: str, root: str) -> bool:
+    """判断绝对路径是否落在 root 之内。"""
+    try:
+        p = os.path.normcase(os.path.abspath(path))
+        r = os.path.normcase(os.path.abspath(root))
+    except (ValueError, OSError):
+        return False
+    return p == r or p.startswith(r + os.sep)
 
 
 def check_index_paths(root: str) -> list | None:
     """扫 root 下 LONGTERM.md 里的绝对路径。返回 findings 或 None（无索引文件）。
 
-    finding = {'line': int, 'text': str}
+    finding = {'line': int, 'text': str, 'path': str, 'kind': 'inside'|'outside'}
+      - kind='inside'  → 指向 root 内却写成绝对，**必须改成相对**
+      - kind='outside' → 指向 root 外的外部真源，当前写法合理，迁移后需重指
     """
     index = os.path.join(root, INDEX_FILENAME)
     if not os.path.isfile(index):
@@ -159,35 +201,44 @@ def check_index_paths(root: str) -> list | None:
     findings = []
     with open(index, 'r', encoding='utf-8', errors='replace') as f:
         for lineno, line in enumerate(f, start=1):
-            hit = None
-            for pat in _ABS_PATTERNS:
-                m = pat.search(line)
-                if m:
-                    hit = m.group(0)
-                    break
-            if hit is None:
-                m = _POSIX_ABS.search(line)
-                if m:
-                    hit = m.group(1)
-            if hit is not None:
-                findings.append({'line': lineno, 'text': line.strip()})
+            for token in _abs_tokens(line):
+                findings.append({
+                    'line': lineno,
+                    'text': line.strip(),
+                    'path': token,
+                    'kind': 'inside' if _is_inside(token, root) else 'outside',
+                })
     return findings
 
 
 def _report_check(root: str) -> tuple:
-    """返回 (输出文本, 是否有问题)。无索引文件 → (跳过文案, False)。"""
+    """返回 (输出文本, 是否有必须修的)。只有 inside 才算必须修。"""
     findings = check_index_paths(root)
     if findings is None:
         return f'[路径检查] 未找到 {INDEX_FILENAME}，跳过。', False
     if not findings:
         return f'[路径检查] {INDEX_FILENAME} 未发现绝对路径。', False
 
-    lines = [f'[路径检查] {INDEX_FILENAME} 发现 {len(findings)} 处绝对路径'
-             f'（搬机器会断）：']
-    for item in findings:
-        lines.append(f"  第 {item['line']} 行  {item['text']}")
-    lines.append('改成相对路径（相对索引文件所在目录），例如：tools/a.py')
-    return '\n'.join(lines), True
+    inside = [f for f in findings if f['kind'] == 'inside']
+    outside = [f for f in findings if f['kind'] == 'outside']
+
+    lines = []
+    if inside:
+        lines.append(f'[路径检查] {len(inside)} 处**该修**'
+                     f'（指向自己的目录却写成绝对，搬机器必断）：')
+        for item in inside:
+            lines.append(f"  第 {item['line']} 行  {item['path']}")
+        lines.append('改成相对索引文件所在目录的路径，例如：tools/a.py')
+    if outside:
+        if lines:
+            lines.append('')
+        lines.append(f'[路径检查] {len(outside)} 处外部真源指路'
+                     f'（当前写法合理，迁移后需重新指路）：')
+        for item in outside:
+            lines.append(f"  第 {item['line']} 行  {item['path']}")
+        lines.append('这些指向本机别处，写不了相对路径；只要别把它们当成本区内容就行。')
+
+    return '\n'.join(lines), bool(inside)
 
 
 def compile_boot_manifest(identity: str, workspace: str = None) -> str:
