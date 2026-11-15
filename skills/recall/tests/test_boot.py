@@ -13,10 +13,10 @@ import pytest
 
 import scripts.config as cfg
 from scripts.boot import (
-    INDEX_FILENAME, check_index_paths, compile_boot_manifest, main,
-    scan_longterm,
+    INDEX_FILENAME, check_index_paths, check_portability, classify_path,
+    compile_boot_manifest, main, scan_longterm,
 )
-from scripts.config import get_agent_dir
+from scripts.config import get_agent_dir, get_self_path
 from scripts.self_model import ensure_self
 
 
@@ -382,7 +382,7 @@ def test_check_cli_reports_and_exit_zero(agent, capsys):
     out = capsys.readouterr().out
 
     assert rc == 0
-    assert '路径检查' in out
+    assert '路径体检' in out
     assert '第 1 行' in out
 
 
@@ -503,6 +503,172 @@ def test_show_paths_absent(agent, capsys):
 
     assert rc == 0
     assert '未设置' in out
+
+
+# ============================================================
+# 票 #15：路径可移植性三级判据
+# ============================================================
+
+def test_classify_inside(agent):
+    """agent 目录内的路径 → inside"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm', 'tools', 'a.py')
+
+    assert classify_path(inside, get_agent_dir(agent)) == 'inside'
+
+
+def test_classify_home_windows(agent):
+    """C:\\Users\\X\\.dsh\\skills → home"""
+    home_path = os.path.join(os.path.expanduser('~'), '.dsh', 'skills')
+    if not os.path.isabs(home_path):        # 兜底：某些环境 ~ 不展开
+        pytest.skip('home 不可解析')
+    assert classify_path(home_path, get_agent_dir(agent)) == 'home'
+
+
+def test_classify_home_tilde(agent):
+    """已经是 ~/ 写法 → None（可移植，不该报）"""
+    assert classify_path('~/.dsh/skills', get_agent_dir(agent)) is None
+
+
+def test_classify_external(agent):
+    """别的盘 → external"""
+    assert classify_path('D:\\Project\\Other', get_agent_dir(agent)) == 'external'
+
+
+def test_classify_relative_is_never_absolute(agent):
+    """相对路径 → None（不需要判级）"""
+    assert classify_path('longterm/tools/a.py', get_agent_dir(agent)) is None
+
+
+def test_check_scans_self_md(agent):
+    """self.md 的 mutable 里有绝对路径 → 报出"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm')
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {'paths': [f'我的长期内容在 {inside}']},
+        'description': 'x',
+    })
+
+    findings = check_portability(agent)
+
+    assert findings
+    assert any(f['kind'] == 'inside' for f in findings)
+    assert all(f['source'] == 'self.md' for f in findings)
+
+
+def test_check_scans_agent_json(agent):
+    """agent.json 里有绝对路径 → 报出"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {}, 'description': 'x',
+    })
+    with open(os.path.join(get_agent_dir(agent), 'agent.json'), 'w',
+              encoding='utf-8') as f:
+        f.write('{"name": "kaibian", "description": "项目在 D:\\\\Project\\\\AIRPCreate"}')
+
+    findings = check_portability(agent)
+
+    assert any(f['source'] == 'agent.json' for f in findings)
+    assert any(f['kind'] == 'external' for f in findings)
+
+
+def test_check_scans_longterm_index(agent):
+    """LONGTERM.md 里有绝对路径 → 报出"""
+    ensure_self(agent)
+    inside = os.path.join(get_agent_dir(agent), 'longterm')
+    _mkfile(os.path.join(inside, 'LONGTERM.md'),
+            f'# 索引\n- {inside}\\tools\\a.py\n')
+
+    findings = check_portability(agent)
+
+    assert any(f['source'] == 'LONGTERM.md' for f in findings)
+
+
+def test_check_decodes_json_escapes(agent):
+    """JSON 双反斜杠 C:\\\\Users\\\\... 能正确识别成一条，不重复计数"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm')
+    escaped = inside.replace('\\', '\\\\')
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {}, 'description': 'x',
+    })
+    # 手工写一份带转义的 self.md
+    with open(get_self_path(agent), 'w', encoding='utf-8') as f:
+        f.write('---\nname: kaibian\n'
+                f'mutable: {{"paths": ["在 {escaped} 里"]}}\n---\n正文\n')
+
+    findings = check_portability(agent)
+
+    paths = [f['path'] for f in findings]
+    assert len(paths) == 1, f'转义导致重复计数：{paths}'
+    assert '\\\\' not in paths[0]
+
+
+def test_report_shows_rewrite_suggestion(agent, capsys):
+    """报告给出「原值 → 建议值」"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm', 'tools')
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': [f'内容在 {inside}']}, 'description': 'x',
+    })
+
+    rc = main(['--identity', agent, '--check'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '→' in out                # 建议重写
+    assert '该修' in out
+
+
+def test_strict_fails_on_inside(agent):
+    """有 inside → --strict 退 1"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm')
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': [inside]}, 'description': 'x',
+    })
+
+    assert main(['--identity', agent, '--check', '--strict']) == 1
+
+
+def test_strict_fails_on_home(agent):
+    """有 home（写成 C:\\Users\\X\\...）→ --strict 也退 1（写 ~ 就能搬）"""
+    home_path = os.path.join(os.path.expanduser('~'), '.dsh', 'skills')
+    if not os.path.isabs(home_path):
+        pytest.skip('home 不可解析')
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': [home_path]}, 'description': 'x',
+    })
+
+    assert main(['--identity', agent, '--check', '--strict']) == 1
+
+
+def test_strict_passes_on_external(agent):
+    """只有 external → --strict 退 0"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': ['D:\\Project\\Other']}, 'description': 'x',
+    })
+
+    assert main(['--identity', agent, '--check', '--strict']) == 0
+
+
+def test_check_readonly(agent):
+    """跑完 self.md / agent.json mtime 不变"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': ['~/.dsh/skills']}, 'description': 'x',
+    })
+    files = [get_self_path(agent),
+             os.path.join(get_agent_dir(agent), 'agent.json')]
+    files = [p for p in files if os.path.exists(p)]
+    before = {p: os.stat(p).st_mtime_ns for p in files}
+
+    check_portability(agent)
+
+    after = {p: os.stat(p).st_mtime_ns for p in before}
+    assert before == after
 
 
 def test_identity_omits_missing_style_and_boundary(agent):

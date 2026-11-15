@@ -16,6 +16,7 @@
 CLI:
     python boot.py --identity NAME [--workspace PATH]
 """
+import json
 import os
 import re
 import sys
@@ -162,9 +163,10 @@ def _render_longterm(scan: dict) -> str:
 _CJK = re.compile(r'[\u4e00-\u9fff]')
 # Windows 盘符：D:\... 或 C:/...
 _WIN_TOKEN = re.compile(r'[A-Za-z]:[\\/][^\s`\'"|)\]}，。、；：]*')
+# `~/...`——可移植写法，但归一后若落在 agent 目录内仍属「该修」
+_TILDE_TOKEN = re.compile(r'~[\\/][^\s`\'"|)\]}，。、；：]*')
 # POSIX 绝对：**必须有左边界**（行首/空白/反引号/括号），且至少两段。
 # 没有左边界就会把 `new/list/...` 这类正文斜杠当成路径。
-# `~/.agents/skills` 故意不匹配——`~` 不是边界字符，而它本身就是可移植的。
 _POSIX_TOKEN = re.compile(
     r'(?:^|[\s`(\[{|,，])/(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+/?')
 
@@ -172,7 +174,7 @@ _POSIX_TOKEN = re.compile(
 def _abs_tokens(line: str) -> list:
     """从一行里抠出绝对路径候选。宁缺勿滥——正文里的斜杠不算。"""
     tokens = []
-    for pat in (_WIN_TOKEN, _POSIX_TOKEN):
+    for pat in (_WIN_TOKEN, _TILDE_TOKEN, _POSIX_TOKEN):
         for m in pat.finditer(line):
             token = m.group(0).strip()
             # 去掉可能被一起吞掉的前导边界字符
@@ -199,6 +201,170 @@ def _is_inside(path: str, root: str) -> bool:
     return p == r or p.startswith(r + os.sep)
 
 
+# --- Issue #15：路径可移植性三级判据 -------------------------------------
+#
+# 实测 12 个 agent 共 30 处绝对路径，其中 self.md 占 20 处——#10 加了 paths
+# 之后，智能体照着自己机器的样子填的。发现不是两档而是三档：
+#
+#   inside   跟着 agent 目录搬 → 必断 → 写相对
+#   home     跟着用户账户搬   → 换用户名就断 → 写 ~/
+#   external 跟着别的项目走   → 只能绝对 → 标注即可
+#
+# 判据一句话：**这段路径跟着谁搬家？**
+
+
+def classify_path(path: str, agent_dir: str) -> str | None:
+    """返回 'inside' | 'home' | 'external' | None（不需要判级）。
+
+    **已经是 `~/` 写法的直接返回 None**——它本来就跟着账户走，是可移植的，
+    报出来只会制造噪音（实测里 `~/.agents/skills` 被误报成「可改进」）。
+    """
+    if not path:
+        return None
+    text = str(path).strip().strip('`\'"')
+    if not text:
+        return None
+
+    if text.startswith('~'):
+        # 唯一例外：`~/` 之后仍落在 agent 目录内（罕见但可能）
+        expanded = os.path.expanduser(text)
+        return 'inside' if _is_inside(expanded, agent_dir) else None
+
+    if not os.path.isabs(text):
+        return None
+
+    if _is_inside(text, agent_dir):
+        return 'inside'
+
+    home = os.path.expanduser('~')
+    if home and os.path.isabs(home) and _is_inside(text, home):
+        return 'home'
+
+    return 'external'
+
+
+def _suggest(path: str, kind: str, agent_dir: str) -> str:
+    """给一条「该改成什么」的建议。"""
+    if kind == 'inside':
+        try:
+            rel = os.path.relpath(os.path.expanduser(path), agent_dir)
+            if not rel.startswith('..'):
+                return rel.replace('\\', '/')
+        except ValueError:
+            pass
+        return '相对 agent 目录（它会跟着搬）'
+    if kind == 'home':
+        home = os.path.expanduser('~')
+        try:
+            rel = os.path.relpath(os.path.expanduser(path), home)
+            if not rel.startswith('..'):
+                return '~/' + rel.replace('\\', '/')
+        except ValueError:
+            pass
+        return '~/...'
+    return '保留绝对，但标注为外部真源'
+
+
+def _strings_in(obj) -> list:
+    """递归取出 JSON 结构里所有字符串（列表/字典/标量都吃）。"""
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, list):
+        out = []
+        for item in obj:
+            out.extend(_strings_in(item))
+        return out
+    if isinstance(obj, dict):
+        out = []
+        for value in obj.values():
+            out.extend(_strings_in(value))
+        return out
+    return []
+
+
+def _norm_key(path: str) -> str:
+    """归一化用于去重：去掉多余反斜杠转义，统一大小写（Windows）。"""
+    text = str(path).strip()
+    while '\\\\' in text:
+        text = text.replace('\\\\', '\\')
+    return os.path.normcase(text.replace('\\', '/').rstrip('/'))
+
+
+def check_portability(agent: str) -> list:
+    """体检一个 agent 的三处载体：self.md / agent.json / LONGTERM.md。
+
+    finding = {'source','line','path','kind','suggest'}
+    只读，不改任何文件。
+
+    去重键是**归一化后的路径**：self.md 的 mutable 是 JSON，同一段路径
+    在原文里是双反斜杠、在解析后是单反斜杠，不归一会重复计数。
+    """
+    agent_dir = get_agent_dir(agent)
+    findings = []
+    seen = set()
+
+    def _add(source: str, lineno: int, token: str):
+        token = token.strip()
+        if not token:
+            return
+        kind = classify_path(token, agent_dir)
+        if kind is None:
+            return
+        key = _norm_key(token)
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append({'source': source, 'line': lineno, 'path': token,
+                         'kind': kind,
+                         'suggest': _suggest(token, kind, agent_dir)})
+
+    # 1) self.md —— 先取 mutable（解析后的值，转义已还原），再扫正文
+    self_path = os.path.join(agent_dir, 'self.md')
+    if os.path.isfile(self_path):
+        data = read_self(agent) or {}
+        for value in _strings_in(data.get('mutable') or {}):
+            for token in _abs_tokens(value):
+                _add('self.md', 0, token)
+        try:
+            text = open(self_path, encoding='utf-8', errors='replace').read()
+        except OSError:
+            text = ''
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for token in _abs_tokens(line):
+                _add('self.md', lineno, token)
+
+    # 2) agent.json
+    meta_path = os.path.join(agent_dir, 'agent.json')
+    if os.path.isfile(meta_path):
+        try:
+            text = open(meta_path, encoding='utf-8', errors='replace').read()
+        except OSError:
+            text = ''
+        try:
+            meta = json.loads(text)
+        except (ValueError, TypeError):
+            meta = {}
+        for value in _strings_in(meta):
+            for token in _abs_tokens(value):
+                _add('agent.json', 0, token)
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for token in _abs_tokens(line):
+                _add('agent.json', lineno, token)
+
+    # 3) LONGTERM.md
+    index = os.path.join(agent_dir, 'longterm', INDEX_FILENAME)
+    if os.path.isfile(index):
+        try:
+            text = open(index, encoding='utf-8', errors='replace').read()
+        except OSError:
+            text = ''
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for token in _abs_tokens(line):
+                _add('LONGTERM.md', lineno, token)
+
+    return findings
+
+
 def check_index_paths(root: str) -> list | None:
     """扫 root 下 LONGTERM.md 里的绝对路径。返回 findings 或 None（无索引文件）。
 
@@ -223,34 +389,43 @@ def check_index_paths(root: str) -> list | None:
     return findings
 
 
-def _report_check(root: str) -> tuple:
-    """返回 (输出文本, 是否有必须修的)。只有 inside 才算必须修。"""
-    findings = check_index_paths(root)
-    if findings is None:
-        return f'[路径检查] 未找到 {INDEX_FILENAME}，跳过。', False
+_KIND_LABEL = {
+    'inside': ('✗', '该修', '指向自己却写绝对，搬机器必断'),
+    'home': ('⚠', '可改进', '在用户目录下，写 ~/ 就能搬'),
+    'external': ('ℹ', '外部真源', '当前只能绝对，迁移后重指'),
+}
+
+
+def _report_portability(agent: str) -> tuple:
+    """返回 (输出文本, 是否有该修的)。该修 = inside 或 home。"""
+    findings = check_portability(agent)
     if not findings:
-        return f'[路径检查] {INDEX_FILENAME} 未发现绝对路径。', False
+        return f'[路径体检] @{agent} 未发现绝对路径。', False
 
-    inside = [f for f in findings if f['kind'] == 'inside']
-    outside = [f for f in findings if f['kind'] == 'outside']
+    counts = {'inside': 0, 'home': 0, 'external': 0}
+    for f in findings:
+        counts[f['kind']] += 1
 
-    lines = []
-    if inside:
-        lines.append(f'[路径检查] {len(inside)} 处**该修**'
-                     f'（指向自己的目录却写成绝对，搬机器必断）：')
-        for item in inside:
-            lines.append(f"  第 {item['line']} 行  {item['path']}")
-        lines.append('改成相对索引文件所在目录的路径，例如：tools/a.py')
-    if outside:
-        if lines:
-            lines.append('')
-        lines.append(f'[路径检查] {len(outside)} 处外部真源指路'
-                     f'（当前写法合理，迁移后需重新指路）：')
-        for item in outside:
-            lines.append(f"  第 {item['line']} 行  {item['path']}")
-        lines.append('这些指向本机别处，写不了相对路径；只要别把它们当成本区内容就行。')
+    lines = [f'[路径体检] @{agent}']
+    for kind in ('inside', 'home', 'external'):
+        group = [f for f in findings if f['kind'] == kind]
+        if not group:
+            continue
+        icon, label, why = _KIND_LABEL[kind]
+        lines.append(f'  {icon} {len(group)} 处{label}（{why}）')
+        for item in group:
+            where = f"{item['source']}"
+            if item['line']:
+                where += f" 第 {item['line']} 行"
+            lines.append(f'    {where}  {item["path"]}')
+            lines.append(f'    → {item["suggest"]}')
 
-    return '\n'.join(lines), bool(inside)
+    total = len(findings)
+    must_fix = counts['inside'] + counts['home']
+    lines.append('')
+    lines.append(f'共 {total} 处：该修 {counts["inside"]} · '
+                 f'可改进 {counts["home"]} · 外部 {counts["external"]}')
+    return '\n'.join(lines), must_fix > 0
 
 
 def compile_boot_manifest(identity: str, workspace: str = None) -> str:
@@ -279,6 +454,7 @@ def main(argv=None) -> int:
     check = False
     strict = False
     show_paths = False
+    check_all = False
 
     i = 0
     while i < len(argv):
@@ -291,15 +467,20 @@ def main(argv=None) -> int:
             check = True; i += 1
         elif arg == '--strict':
             strict = True; i += 1
+        elif arg == '--all':
+            check_all = True; i += 1
         elif arg == '--show-paths':
             show_paths = True; i += 1
         else:
             print(f'Unknown option: {arg}', file=sys.stderr)
             return 2
 
-    if not identity:
+    if check_all:
+        check = True                      # --all 隐含 --check
+
+    if not identity and not check_all:
         print('Usage: boot.py --identity NAME [--workspace PATH] '
-              '[--check [--strict]] [--show-paths]', file=sys.stderr)
+              '[--check [--strict] [--all]] [--show-paths]', file=sys.stderr)
         return 2
 
     if show_paths:
@@ -315,16 +496,18 @@ def main(argv=None) -> int:
         return 0
 
     if check:
-        # 检查哪个根？与清单同口径：工作区优先，其次 agent 的 longterm。
-        roots = [os.path.join(get_agent_dir(identity), 'longterm')]
-        if workspace:
-            roots.insert(0, workspace)
-        target = next((r for r in roots if os.path.isdir(r)), None)
-        if target is None:
-            print('[路径检查] 长期内容目录不可用，跳过。')
-            return 0
-        text, has_issue = _report_check(target)
-        print(text)
+        if check_all:
+            from scripts.config import list_agents
+            names = [a['name'] for a in list_agents()]
+        else:
+            names = [identity]
+        has_issue = False
+        blocks = []
+        for name in names:
+            text, issue = _report_portability(name)
+            blocks.append(text)
+            has_issue = has_issue or issue
+        print('\n\n'.join(blocks))
         return 1 if (strict and has_issue) else 0
 
     print(compile_boot_manifest(identity, workspace=workspace), end='')
