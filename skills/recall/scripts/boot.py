@@ -17,6 +17,7 @@ CLI:
     python boot.py --identity NAME [--workspace PATH]
 """
 import os
+import re
 import sys
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -37,7 +38,7 @@ _INDENT = ' ' * 10
 
 
 def scan_longterm(roots: list) -> dict:
-    """扫长期内容根。返回 {'categories','index_file','unavailable'}。
+    """扫长期内容根。返回 {'categories','index_file','root','unavailable'}。
 
     规则（见 Issue #9「扫描算法」）：
       - root 不存在 → 进 unavailable
@@ -46,9 +47,13 @@ def scan_longterm(roots: list) -> dict:
       - root 直接放的散文件**不计入类目**（只能靠索引被发现）
       - `.` 开头的隐藏目录/文件跳过
       - categories 按 key 升序，保证确定性
+
+    `index_file` 是**相对 root 的裸文件名**（Issue #14）：绝对路径会被智能体
+    照抄进自己的索引，工作区一搬家就全断。绝对路径只放在 `root` 里当定位信息。
     """
     categories: dict = {}
     index_file = None
+    index_root = None
     unavailable: list = []
 
     for root in roots or []:
@@ -59,7 +64,8 @@ def scan_longterm(roots: list) -> dict:
 
         candidate = os.path.join(root, INDEX_FILENAME)
         if index_file is None and os.path.isfile(candidate):
-            index_file = candidate
+            index_file = INDEX_FILENAME        # 相对，不是绝对
+            index_root = root
 
         for name in sorted(os.listdir(root)):
             if name.startswith('.'):
@@ -76,6 +82,7 @@ def scan_longterm(roots: list) -> dict:
     return {
         'categories': {k: categories[k] for k in sorted(categories)},
         'index_file': index_file,
+        'root': index_root,
         'unavailable': unavailable,
     }
 
@@ -101,21 +108,86 @@ def _render_identity(identity: str) -> str:
 
 
 def _render_longterm(scan: dict) -> str:
-    """第二块：三种情形（不可用 / 无 / 有类目）。"""
+    """第二块：三种情形（不可用 / 无 / 有类目）。
+
+    索引路径写成**相对**（Issue #14），绝对路径只出现在「根」那句里当定位。
+    这样智能体照抄进自己索引的，是 `LONGTERM.md` 而不是 `D:\\...\\LONGTERM.md`。
+    """
     categories = scan.get('categories') or {}
     index_file = scan.get('index_file')
+    root = scan.get('root')
 
     if not categories:
         unavailable = scan.get('unavailable') or []
         if unavailable:
             return f'长期内容  不可用（{unavailable[0]} 不存在）'
+        if index_file:
+            # 没有类目目录，但有索引——索引不能丢，条目可能都在根下
+            location = f'（根 {root}）' if root else ''
+            return f'长期内容  无类目\n{_INDENT}→ {index_file}{location}'
         return '长期内容  无'
 
     joined = ' · '.join(f'{name} {count}' for name, count in categories.items())
     lines = [f'长期内容  {joined}']
     if index_file:
-        lines.append(f'{_INDENT}→ {index_file}')
+        location = f'（根 {root}）' if root else ''
+        lines.append(f'{_INDENT}→ {index_file}{location}')
     return '\n'.join(lines)
+
+
+# --- Issue #14：索引里的绝对路径检查 -------------------------------------
+#
+# 检查只报不改：改不改是智能体自己的决定。发现问题时退出码仍为 0（这是检查，
+# 不是断言失败）；要进 CI 用 --strict。
+_ABS_PATTERNS = (
+    re.compile(r'[A-Za-z]:[\\/]'),          # Windows 盘符 C:\ / D:/
+    re.compile(r'file://'),                 # file:// 协议
+)
+# POSIX 绝对：行内以 / 开头，且后面跟路径分隔——避免把「和/或」这类误判
+_POSIX_ABS = re.compile(r'(?:^|[\s`(\[])(/[A-Za-z0-9_.\-]+/+)')
+
+
+def check_index_paths(root: str) -> list | None:
+    """扫 root 下 LONGTERM.md 里的绝对路径。返回 findings 或 None（无索引文件）。
+
+    finding = {'line': int, 'text': str}
+    """
+    index = os.path.join(root, INDEX_FILENAME)
+    if not os.path.isfile(index):
+        return None
+
+    findings = []
+    with open(index, 'r', encoding='utf-8', errors='replace') as f:
+        for lineno, line in enumerate(f, start=1):
+            hit = None
+            for pat in _ABS_PATTERNS:
+                m = pat.search(line)
+                if m:
+                    hit = m.group(0)
+                    break
+            if hit is None:
+                m = _POSIX_ABS.search(line)
+                if m:
+                    hit = m.group(1)
+            if hit is not None:
+                findings.append({'line': lineno, 'text': line.strip()})
+    return findings
+
+
+def _report_check(root: str) -> tuple:
+    """返回 (输出文本, 是否有问题)。无索引文件 → (跳过文案, False)。"""
+    findings = check_index_paths(root)
+    if findings is None:
+        return f'[路径检查] 未找到 {INDEX_FILENAME}，跳过。', False
+    if not findings:
+        return f'[路径检查] {INDEX_FILENAME} 未发现绝对路径。', False
+
+    lines = [f'[路径检查] {INDEX_FILENAME} 发现 {len(findings)} 处绝对路径'
+             f'（搬机器会断）：']
+    for item in findings:
+        lines.append(f"  第 {item['line']} 行  {item['text']}")
+    lines.append('改成相对路径（相对索引文件所在目录），例如：tools/a.py')
+    return '\n'.join(lines), True
 
 
 def compile_boot_manifest(identity: str, workspace: str = None) -> str:
@@ -137,10 +209,12 @@ def compile_boot_manifest(identity: str, workspace: str = None) -> str:
 
 
 def main(argv=None) -> int:
-    """CLI: python boot.py --identity NAME [--workspace PATH]"""
+    """CLI: python boot.py --identity NAME [--workspace PATH] [--check [--strict]]"""
     argv = argv if argv is not None else sys.argv[1:]
     identity = None
     workspace = None
+    check = False
+    strict = False
 
     i = 0
     while i < len(argv):
@@ -149,13 +223,31 @@ def main(argv=None) -> int:
             identity = argv[i + 1]; i += 2
         elif arg == '--workspace' and i + 1 < len(argv):
             workspace = argv[i + 1]; i += 2
+        elif arg == '--check':
+            check = True; i += 1
+        elif arg == '--strict':
+            strict = True; i += 1
         else:
             print(f'Unknown option: {arg}', file=sys.stderr)
             return 2
 
     if not identity:
-        print('Usage: boot.py --identity NAME [--workspace PATH]', file=sys.stderr)
+        print('Usage: boot.py --identity NAME [--workspace PATH] '
+              '[--check [--strict]]', file=sys.stderr)
         return 2
+
+    if check:
+        # 检查哪个根？与清单同口径：工作区优先，其次 agent 的 longterm。
+        roots = [os.path.join(get_agent_dir(identity), 'longterm')]
+        if workspace:
+            roots.insert(0, workspace)
+        target = next((r for r in roots if os.path.isdir(r)), None)
+        if target is None:
+            print('[路径检查] 长期内容目录不可用，跳过。')
+            return 0
+        text, has_issue = _report_check(target)
+        print(text)
+        return 1 if (strict and has_issue) else 0
 
     print(compile_boot_manifest(identity, workspace=workspace), end='')
     return 0

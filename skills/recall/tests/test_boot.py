@@ -12,7 +12,10 @@ import tempfile
 import pytest
 
 import scripts.config as cfg
-from scripts.boot import compile_boot_manifest, scan_longterm, main
+from scripts.boot import (
+    INDEX_FILENAME, check_index_paths, compile_boot_manifest, main,
+    scan_longterm,
+)
 from scripts.config import get_agent_dir
 from scripts.self_model import ensure_self
 
@@ -76,8 +79,11 @@ def test_zero_file_category_shown(agent):
     assert 'empty_cat 0' in out
 
 
-def test_index_file_path_shown(agent):
-    """有 LONGTERM.md → 含其绝对路径"""
+def test_index_file_is_relative(agent):
+    """索引路径必须是**相对**的；绝对路径只许出现在「根」那句里
+
+    绝对路径会被智能体照抄进自己的索引，搬机器即断（Issue #14）。
+    """
     _self(agent)
     _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
     index = os.path.join(_longterm(agent), 'LONGTERM.md')
@@ -85,7 +91,21 @@ def test_index_file_path_shown(agent):
 
     out = compile_boot_manifest(agent)
 
-    assert index in out
+    assert 'LONGTERM.md' in out
+    assert '根 ' in out
+    # 索引指向必须是裸文件名，不能是绝对路径
+    assert f'→ {index}' not in out
+    assert f'→ {INDEX_FILENAME}' in out
+
+
+def test_root_shown_for_location(agent):
+    """「根」那句给的是定位信息，且确实是所在目录"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), '# 索引\n')
+
+    out = compile_boot_manifest(agent)
+
+    assert f'根 {_longterm(agent)}' in out
 
 
 def test_missing_longterm_reports_unavailable(agent):
@@ -152,19 +172,20 @@ def test_deterministic(agent):
 
 
 def test_workspace_root_priority(agent, tmp_path):
-    """--workspace 下有 LONGTERM.md → index_file 指向它而非 agent 目录"""
+    """--workspace 下有 LONGTERM.md → 用的是它（与 agent 目录的区分开）"""
     _self(agent)
     _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), 'agent\n')
 
     ws = str(tmp_path / 'workspace')
-    ws_index = os.path.join(ws, 'LONGTERM.md')
-    _mkfile(ws_index, 'workspace\n')
+    _mkfile(os.path.join(ws, 'LONGTERM.md'), 'workspace\n')
     _mkfile(os.path.join(ws, 'tools', 'a.py'))
 
     out = compile_boot_manifest(agent, workspace=ws)
 
-    assert ws_index in out
-    assert os.path.join(_longterm(agent), 'LONGTERM.md') not in out
+    assert 'LONGTERM.md' in out
+    # 根是工作区，不是 agent 的 longterm 目录
+    assert f'根 {ws}' in out
+    assert f'根 {_longterm(agent)}' not in out
 
 
 def test_scan_longterm_returns_structure(agent):
@@ -278,6 +299,93 @@ def test_cli_prints_manifest(agent, capsys):
 
     assert rc == 0
     assert '[开机]' in out
+
+
+# ============================================================
+# 票2：--check 扫索引里的绝对路径（Issue #14）
+# ============================================================
+
+def test_check_finds_windows_drive(agent):
+    """索引里写 D:\\x\\a.py → 被抓出来"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '# 索引\n- tools/a.py\n- D:\\Project\\ws\\tools\\b.py\n')
+
+    findings = check_index_paths(_longterm(agent))
+
+    assert len(findings) == 1
+    assert findings[0]['line'] == 3
+    assert 'D:\\Project' in findings[0]['text']
+
+
+def test_check_finds_posix_absolute(agent):
+    """POSIX 绝对路径同样被抓"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- /home/user/ws/tools/a.py\n')
+
+    findings = check_index_paths(_longterm(agent))
+
+    assert len(findings) == 1
+    assert '/home/' in findings[0]['text']
+
+
+def test_check_finds_file_protocol(agent):
+    """file:// 协议也算绝对"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- file:///C:/x/a.py\n')
+
+    findings = check_index_paths(_longterm(agent))
+
+    assert len(findings) == 1
+
+
+def test_check_clean_index(agent):
+    """全是相对路径 → 无发现"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '# 索引\n- tools/a.py\n- kb/S1.md\n')
+
+    assert check_index_paths(_longterm(agent)) == []
+
+
+def test_check_missing_index(agent):
+    """无索引文件 → 返回 None（区别于「干净」的 []）"""
+    _self(agent)
+    os.makedirs(_longterm(agent))
+
+    assert check_index_paths(_longterm(agent)) is None
+
+
+def test_check_cli_reports_and_exit_zero(agent, capsys):
+    """--check 有问题时退出码 0（这是检查不是断言），输出含行号"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- D:\\x\\a.py\n')
+
+    rc = main(['--identity', agent, '--check'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '路径检查' in out
+    assert 'D:\\x\\a.py' in out
+
+
+def test_check_strict_exit_one(agent):
+    """--check --strict 有问题 → 退出码 1"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), '- D:\\x\\a.py\n')
+
+    assert main(['--identity', agent, '--check', '--strict']) == 1
+
+
+def test_check_strict_clean_exit_zero(agent):
+    """--strict 且干净 → 退出码 0"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), '- tools/a.py\n')
+
+    assert main(['--identity', agent, '--check', '--strict']) == 0
 
 
 def test_identity_omits_missing_style_and_boundary(agent):
