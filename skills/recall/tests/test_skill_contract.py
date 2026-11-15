@@ -188,3 +188,63 @@ def test_default_template_keeps_paths():
     joined = ' '.join(DEFAULT_PATHS)
     assert '技能库' in joined
     assert '同伴' in joined
+
+
+# ============================================================
+# 6. 文档与实现对齐（Issue #17）——反向锁
+# ============================================================
+
+# 这些参数只存在于库函数 recall_associative() 的签名里，CLI 从不暴露。
+# 实测：recall.py / prep.py 传这些一律 Unknown option 退出 2。
+LIB_ONLY_FLAGS = ('--tag-weight', '--time-ratio', '--truncate')
+
+
+def _cli_lines(text):
+    """抽出所有 ```bash / ``` 代码块里的行（只查命令行示例）。"""
+    lines = []
+    in_block = False
+    for line in text.splitlines():
+        if line.strip().startswith('```'):
+            in_block = not in_block
+            continue
+        if in_block:
+            lines.append(line)
+    return lines
+
+
+def test_skill_md_has_no_fake_cli_flags(skill):
+    """命令行示例里不得出现 CLI 不存在的参数。
+
+    这是本 Issue 的核心反向锁：把「文档教了跑不通的参数」变成测试失败，
+    而不是靠人记得改。
+    """
+    for line in _cli_lines(skill):
+        for flag in LIB_ONLY_FLAGS:
+            assert flag not in line, (
+                f'SKILL.md 的命令行示例用了 CLI 不存在的参数 {flag}：{line!r}\n'
+                f'（它只在 recall_associative() 的 Python 签名里）'
+            )
+
+
+def test_skill_md_lists_all_scripts(skill):
+    """实际存在的每个 scripts/*.py，都要在「文件结构」里出现。"""
+    import glob
+    scripts_dir = os.path.join(REPO_ROOT, 'skills', 'recall', 'scripts')
+    real = {os.path.basename(p) for p in glob.glob(os.path.join(scripts_dir, '*.py'))}
+    real.discard('__init__.py')
+    missing = sorted(n for n in real if n not in skill)
+    assert not missing, f'SKILL.md 文件结构漏了这些脚本：{missing}'
+
+
+def test_skill_md_no_phantom_dir(skill):
+    """不许列出不存在的目录（references/ 从没建过）。"""
+    import os as _os
+    if not _os.path.isdir(_os.path.join(REPO_ROOT, 'skills', 'recall', 'references')):
+        assert 'references/' not in skill, 'SKILL.md 列了不存在的 references/ 目录'
+
+
+def test_skill_md_description_of_session_start_cli(skill):
+    """session_start 已改为不截断，文档不许再写「≤200 字」。"""
+    for line in skill.splitlines():
+        if 'session_start' in line and '200' in line:
+            pytest.fail(f'session_start 描述已过期（实现早改成不截断）：{line!r}')

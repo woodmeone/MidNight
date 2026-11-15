@@ -12,7 +12,7 @@ description: "让 AI 拥有长期记忆——自动写日记、联想式召回�
 1. **自动写日记**：你聊完一段重要内容，AI 会在回复末尾写一份日记文件。Agent 用 `write_file` 工具写入 **当前 agent 专属目录** `~/.midnight/recall/<agent>/dailynote/`（`<agent>` 为当前智能体名，默认 `default`），`ingest.py` 自动入库。**不要写根级 `~/.midnight/recall/dailynote/`**——那是无主数据，不属于任何智能体。
 2. **联想式召回**：不靠关键词命中，而是通过"标签共现网络"脉冲传播——你今天说"压力大"，昨天聊的"考试"会自动浮上来。
 3. **时间感知**：最近的记忆有更高权重，新会话开头不空白。
-4. **可配置**：召回数量（`--k`）、联想强度、时间权重、截断比例（`--truncate`，按条数比例裁剪）均可调。
+4. **可配置**：召回数量 `--k`、注入预算 `--budget`、多样性 `--mmr`、多尺度线索 `--multi-scale`、时间窗 `--since/--until` 都是 CLI 参数。联想强度 / 时间权重 / 截断比例属库函数层（`recall_associative` 的 `tag_weight` / `time_ratio` / `truncate`），CLI 不暴露——要用就走 Python。
 5. **注入保留完整 + 预算控体积**：召回的记忆默认**保留完整正文、不拦腰截断**（语义优先）；若担心上下文/token 被撑爆，传 `--budget <字符数>` 按预算召回最高相关的那几条完整记忆即可。
 
 ## 检索铁律（一条主干 + 两个约束，默认走算法不翻原文）
@@ -362,9 +362,12 @@ python recall.py --identity qinglan --query "用户的问题" --k 10
 # 不带身份时的联想召回（无身份 → 可用 --auto 兜底，但可能跨区）
 python recall.py --query "用户的问题" --k 10
 
-# 带联想和时间加权的召回
-python recall.py --identity qinglan --query "用户的问题" --k 10 --tag-weight 0.5 --time-ratio 0.3 --truncate 0.5
+# 限量 + 控体积
+python recall.py --identity qinglan --query "用户的问题" --k 20 --budget 3000
 ```
+
+**联想强度 / 时间权重 / 截断比例** 不在这两个 CLI 上——它们只在
+`recall_associative()` 的签名里。要用就走 Python（见下）。
 
 你也可以直接调用 `recall_associative` 函数（如果脚本作为模块导入）：
 
@@ -376,18 +379,30 @@ results = recall_associative("用户的问题", "~/.midnight/recall/default/reca
                              since="2026-10-01", until=None)   # 时间窗约束（闭区间，可单用）
 ```
 
-## 路由表
+## 场景路由
 
-按场景推荐参数组合：
+按场景选命令。**下表全部是 CLI 真支持的参数**，可以直接复制跑。
 
-| 场景 | k | tag_weight | time_ratio | truncate | 说明 |
-|---|---|---|---|---|---|
-| 新会话开头自动补忆 | 5 | 0.2 | 0.5 | 0.5 | 时间优先，先看看最近发生了什么 |
-| 用户说"还记得吗" | 10 | 0.5 | 0.1 | 0.3 | 联想优先，找最相关的 |
-| 用户说"帮我回忆上次XXX" | 10 | 0.3 | 0.2 | 0.5 | 平衡模式 |
-| 沉默后回复 | 5 | 0.3 | 0.3 | 0.3 | 轻量召回，快速给上下文 |
-| 时间 × 语义（"十月以后关于备课的"） | 10 | 0.3 | 0.2 | 0.5 | 主干 + `--since/--until` 约束，一次调用 |
-| 用户明确说"记住"（不触发召回） | — | — | — | — | 只写日记，不做召回 |
+| 场景 | 命令 |
+|---|---|
+| 每次回复前（默认） | `prep.py --message "用户原话" --identity <名字>` |
+| 新会话开头 | 先 `boot.py --identity <名字>` 一次，再 `prep.py` 补最近记忆 |
+| 「还记得吗」，要更多条 | `prep.py --message "..." --identity <名字> --k 20` |
+| 要多样、别重复 | `prep.py --message "..." --identity <名字> --mmr 0.5` |
+| 长句里藏细线索 | `prep.py --message "..." --identity <名字> --multi-scale` |
+| 控注入体积 | `prep.py --message "..." --identity <名字> --budget 2000` |
+| 时间 × 语义 | `prep.py --message "..." --query "备课 教案" --identity <名字> --since 2026-10-01` |
+| 只写日记，不召回 | 不跑命令，直接写 md |
+
+**`prep.py` 支持的召回参数**：`--k` / `--budget` / `--mmr` / `--multi-scale` /
+`--cooldown` / `--since` / `--until` / `--query` / `--identity` / `--force`。
+
+**`recall.py` 支持**：`--query` / `--k` / `--timeline` / `--literal` / `--audit` /
+`--since` / `--until` / `--budget` / `--identity` / `--auto` / `--prefilter` / `--reward`。
+
+> **注意**：`tag_weight` / `time_ratio` / `truncate` 只存在于库函数
+> `recall_associative()` 的 Python 签名里，**CLI 不暴露**。
+> 要用它们得写 Python 调库，别在命令行试——会 `Unknown option` 退出 2。
 
 ## init 引导（首建自我 + 认识你）
 
@@ -453,8 +468,18 @@ pip install requests
 # export MIDNIGHT_AGENT="default"               # 当前智能体（决定写入哪个子区）
 # 注意：MIDNIGHT_DB_PATH / MIDNIGHT_DAILYNOTE_PATH 已废弃，路径一律按 agent 从 BASE_DIR 推导
 
-## 入库当前 agent 的日记（按 agent 子目录，勿指向根级 dailynote）
-python ingest.py ~/.midnight/recall/default/dailynote/
+## 入库当前 agent 的日记
+
+```bash
+# 推荐：显式指定 agent。库路径、日记目录都按 agent 推导，最不容易错
+python ingest.py --agent default
+
+# 显式覆盖日记目录（位置参数）：库**仍是 --agent 指定的那个**
+python ingest.py /path/to/diary --agent default
+```
+
+> 位置参数只换**读哪里**，库路径由 `--agent` 决定。两者可以指向不同 agent——
+> 想把 A 的日记入到 B 的库时才这么用，平时一致最安全。
 
 ## 测试召回
 python recall.py --query "写一条测试查询" --k 5
@@ -466,29 +491,30 @@ python recall.py --query "写一条测试查询" --k 5
 skills/recall/
 ├── SKILL.md              # 本文件
 ├── scripts/
-│   ├── ingest.py         # 日记入库（切块 → 向量化 → SQLite + 方向边）
-│   ├── recall.py         # 联想召回（向量 + 标签脉冲 + 时间 + 深联想扩增）+ 确定性通道（时间轴/字面）
-│   ├── ledger.py         # 检索留痕（jsonl 追加 / 读取 / 格式化，旁路不拖累检索）
+│   ├── boot.py           # 开机清单（三级加载第一级）：人设摘要 + 长期内容类目
 │   ├── prep.py           # 可移植核心：回复前记忆准备（门控→召回→去重→MMR→预算→文本）
+│   ├── recall.py         # 联想主干（向量 + 标签脉冲 + 时间 + tag-first 扩增）+ 约束（时间窗/字面）+ 留痕审计
 │   ├── tag_network.py    # 标签方向边 + 脉冲传播（压缩/枢纽校正/预算/Core-Ghost）
-│   ├── self_model.py     # self 锚生成/读取/演化（定海锚 + 可动层）
+│   ├── ngrams.py         # 字面 n-gram（倒排预筛的原子单位）
+│   ├── cache.py          # 召回结果缓存（代数失效 + TTL）
+│   ├── ingest.py         # 日记入库（切块 → 向量化 → SQLite + 方向边）
+│   ├── schema.py         # SQLite schema
+│   ├── paths.py          # 可迁移路径：存相对、读还原（老绝对路径兼容）
+│   ├── ledger.py         # 检索留痕（jsonl 追加 / 读取 / 格式化，旁路不拖累检索）
+│   ├── self_model.py     # self 锚（定海锚只读 + 可动层含 paths/evolution）
 │   ├── evolution.py      # 自进化（可动层覆写 + 演化日志 + 久不用衰减）
-│   ├── session_start.py  # 首轮上下文轻编译（身份摘要 ≤200 字）
+│   ├── session_start.py  # 首轮上下文轻编译（身份摘要，不截断）
 │   ├── harvest.py        # 拉取式沉淀（AI 工具落盘摘要 → 日记，补充渠道）
-│   ├── maintenance.py    # 根级孤儿数据检测/迁移（--scan / --migrate）
-│   ├── embedding.py      # embedding 客户端（可注入 fake）
-│   └── schema.py         # SQLite schema
-├── tests/
-│   ├── conftest.py
-│   ├── test_ticket01.py  ~ test_ticket04.py
-│   ├── test_self_model.py
-│   ├── test_object_association.py
-│   ├── test_t3_deep_association.py
-│   ├── test_session_start.py
-│   ├── test_diary_isolation.py / test_auto_routing.py / test_end_to_end.py
-│   └── test_adversarial.py / test_features_adversarial.py / test_base_dir.py
-└── references/           # 按需加载的深度参考
+│   ├── maintenance.py    # 孤儿数据检测/迁移 + 路径相对化（--relativize-paths）
+│   ├── reembed.py        # 非破坏式重嵌入（换 embedding 后端后升级旧向量）
+│   ├── embedding.py      # embedding 客户端三后端（本地 ONNX / API / Fake）
+│   ├── download_bge_m3.py# 拉取本地 bge-m3 模型
+│   └── config.py         # agent 隔离路径（BASE_DIR / agent 目录推导）
+└── tests/                # pytest，按主题分文件（boot / paths / contract / 可迁移 …）
 ```
+
+测试按主题分文件（`test_boot.py` / `test_self_paths.py` / `test_relocatable_paths.py` /
+`test_skill_contract.py` 等），不逐个列——列了会再次过期。跑全量见「测试召回」。
 
 ## 参考资料
 
