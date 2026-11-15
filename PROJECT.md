@@ -62,9 +62,10 @@ recall 内部模块分工：
 - **检索只走库**（ADR-0002）：检索索引唯一载体是 `recall.db`；`dailynote/*.md` 只作 ingest 源，禁止作为检索回退路径；确定性通道必须显式带身份，不许静默落到 env/default 库。
 - **非破坏铁律**：任何维护/演化操作只 UPDATE 既有字段与边，绝不删除、重建、重灌记忆数据；动真实库前先备份。
 - **路径相对化**：`files.file_path` 存相对 agent 目录的路径（正斜杠），库里不存盘符与用户名；
-  读侧用 `isabs` 判定，老绝对路径兼容（零迁移也能跑）。**长期内容索引同样适用**——
-  条目相对索引文件所在目录；指向本机别处的「外部真源」允许绝对，但须分节放置。
-  自查：`boot.py --check`（`--strict` 进 CI）。
+  读侧用 `isabs` 判定，老绝对路径兼容（零迁移也能跑）。
+  **三处载体三级判据**：`self.md` / `agent.json` / `LONGTERM.md` 里的路径按
+  `inside`（写相对）/ `home`（写 `~/`）/ `external`（保留绝对）分档。
+  自查：`boot.py --check`（`--strict` 进 CI，`--all` 全库）。**只报不改**。
 - **定海锚只读**：self 的 name/anchor_tags/description 改写被拒，防跑飞。
 - **零外部服务**：Python + SQLite 标准库自包含；embedding 默认本地 bge-m3 ONNX（1024 维，三级模型解析），无模型无 key 时 Fake 兜底可离线跑。
 - **默认关闭新行为**：多尺度、MMR、深联想等能力开关默认关闭，关闭时逐位等于旧行为。
