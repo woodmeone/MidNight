@@ -31,6 +31,7 @@ recall 内部模块分工：
 | `self_model.py` / `evolution.py` | self 锚（定海锚只读 + 可动层，含 paths/evolution 路径指路）/ 自进化与久不用衰减 |
 | `session_start.py` / `maintenance.py` / `reembed.py` | 首轮身份摘要 / 孤儿数据迁移与 `--relativize-paths` / 非破坏式重嵌入 |
 | `cache.py` / `ngrams.py` / `config.py` | 召回结果缓存 / 倒排 n-gram / agent 物理隔离路径 |
+| `tools/skill_injection_doctor.py` | **宿主侧体检**：查同一个 skill 是否被注入两遍。`--sessions` 判症状、`--config` 判病因。不属于 recall 运行时，不进 skill 安装范围 |
 
 ## 核心业务流程
 
@@ -72,6 +73,11 @@ recall 内部模块分工：
 - **零外部服务**：Python + SQLite 标准库自包含；embedding 默认本地 bge-m3 ONNX（1024 维，三级模型解析），无模型无 key 时 Fake 兜底可离线跑。
 - **默认关闭新行为**：多尺度、MMR、深联想等能力开关默认关闭，关闭时逐位等于旧行为。
 - **许可**：CC BY-NC-SA 4.0；不复制 VCP 代码、不引用 VCP 品牌（ADR-0001）。
+- **宿主注入只许一份**（ADR-0006）：`tool-skill` 是唯一注入方，`skill-filesystem` 只供货不注入。
+  注入方**只允许在预设层启用一处**；host 层保持上游的 `disabled: true`。
+  在 profile 里写 `disabled: false` 会同时启用 host + 预设两份，同一份 SKILL.md
+  每轮注入两遍（实测白烧约 1 万 token/次）。
+  自查：`python tools/skill_injection_doctor.py --config` 与 `--sessions`，两者必须同时绿。
 
 ## 当前支持功能（一行清单）
 

@@ -62,6 +62,18 @@
 | **相对路径（relocatable path）** | 路径的可迁移口径，**三级**：① `inside`——落在 agent 目录内，写相对（`longterm/`）；② `home`——落在用户目录下，写 `~/` 开头；③ `external`——别的盘/别人的项目，只能绝对但标注「外部真源」。判据一句话：**这段路径跟着谁搬家？** 已是 `~/` 写法的不再报。**技能库位置由 harness 运行时提供，不写进文档常量** |
 | **路径体检（path check）** | `boot.py --check`：扫 `self.md` / `agent.json` / `LONGTERM.md` 三处载体的绝对路径，按三级分类，给「原值 → 建议值」。**只报不改**——载体是智能体自己的认知，改不改由它决定。`--strict` 在 inside/home 时退 1，`--all` 扫全部 agent |
 
+### 运行环境（DSH 宿主）
+
+| 术语 | 定义 |
+|---|---|
+| **skill 注入（skill-invocation）** | 用户消息里出现 `/名字` 手势时，宿主把该 SKILL.md **全文**作为一条 `user/message`（`source.kind = skill-invocation`）塞进本轮上下文。这是「说明书递进来」，不是函数调用——模型读完自己照着做。 |
+| **供货方 vs 注入方** | skill 生态里两个正交角色。**供货方**（`skill-filesystem`）只负责发现 SKILL.md 并报进注册表，**从不写上下文**；**注入方**（`tool-skill`）在 `agent/pre-step` 上挂监听器，把正文塞进 messages。查「谁重复注入了」，只可能是注入方被启用了多次。 |
+| **层（layer）** | DSH 配置是叠加的：**host 层**（profile 顶层条目，全 agent 共享）+ **预设层**（每个 agent preset 各挂一份）。同名条目两层都启用 = 两个实例 = 两个监听器。 |
+| **双挂（double-mount）** | 同一个注入方在 host 层与预设层同时启用。后果是同一份正文每轮注入两遍——逐字节相同，纯浪费。上游 `dsh-web-app` 已把 host 层默认 `disabled: true` 就是为了防这个；在 profile 里写 `disabled: false` 会把上游关掉的那份重新打开。 |
+| **生效预设（active preset）** | 预设可以有多个（`standard` / `ptc` / `cordis` / `minimal`），但**同一时刻只有一个 active**（`agent-preset-registry` 的 `selectedDefault`）。判双挂时只能数 host + 当前的 active 预设，把三个预设计入会得出「被塞 4 份」这种与日志对不上的假数字。 |
+| **注入体检（injection doctor）** | `tools/skill_injection_doctor.py`。两个独立判据：`--sessions` 扫会话日志数「同轮同名注入次数」（**症状**，>1 即红）；`--config` 读 `dsh --dump-config` 数注入方生效处数（**病因**，>1 即红）。修完必须两者同时转绿才算完。 |
+| **死条目（dead patch entry）** | profile 里 `- id:` 指向一个当前组合中不存在的条目，dump 会报 `patch: entry "X" not found`。它不报错退出、不生效、也不影响启动——是静默空转，只能靠读 dump 头部发现。 |
+
 ---
 
 ## 相关文档
