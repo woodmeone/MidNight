@@ -62,6 +62,10 @@ def compile_identity_summary(agent: str = None) -> str:
         parts.append(f"风格:{persona_style}")
     if cap_str:
         parts.append(f"能力:{cap_str}")
+    # Issue #12：一句「长期内容可自维护」。固定短串，不动态截取 paths/evolution
+    # 内容——动态截取容易产出半句，违背本模块「不拦腰硬截」的纪律。
+    if mutable.get('evolution'):
+        parts.append('长期内容可自维护')
     return '；'.join(parts) + '。' + CAPABILITY_ANCHOR_TEXT
 
 

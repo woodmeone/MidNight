@@ -13,6 +13,7 @@ CLI:
 """
 import os
 import shutil
+import sqlite3
 import sys
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -112,11 +113,77 @@ def migrate_orphans(agent: str = None, base_dir: str = None) -> dict:
     return result
 
 
+def relativize_paths(agent: str = None, apply: bool = False) -> dict:
+    """把 `files.file_path` 的绝对路径改成相对 agent 目录的路径（Issue #11）。
+
+    **非破坏铁律**：
+      1. 只 `UPDATE files SET file_path = ?`；绝不 DELETE / DROP / 碰 chunks
+      2. apply 前必须备份整库；备份失败直接放弃，一行都不写
+      3. 只处理 `isabs` 为真的行（已经是相对的不动）
+      4. 算不出相对路径（跨盘 / 在 agent 目录外）的跳过，计入 skipped
+      5. 幂等：连跑两次，第二次 would_change 为 0
+
+    apply=False 是默认（dry-run），只报告，零写入。
+    """
+    from datetime import datetime
+
+    from scripts.paths import stored_path
+
+    agent = agent or os.environ.get('MIDNIGHT_AGENT') or DEFAULT_AGENT
+    db_path = get_db_path(agent)
+    result = {'status': 'ok', 'agent': agent, 'db': db_path,
+              'dry_run': not apply, 'would_change': 0, 'total': 0,
+              'skipped': 0, 'samples': []}
+    if not os.path.isfile(db_path):
+        result['error'] = 'db not found'
+        return result
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute('SELECT id, file_path FROM files').fetchall()
+        result['total'] = len(rows)
+
+        pending = []
+        for file_id, file_path in rows:
+            if not file_path or not os.path.isabs(file_path):
+                continue
+            new_path = stored_path(file_path, db_path)
+            if os.path.isabs(new_path):
+                result['skipped'] += 1          # 搬不走，留着
+                continue
+            pending.append((new_path, file_id))
+            if len(result['samples']) < 5:
+                result['samples'].append([file_path, new_path])
+
+        result['would_change'] = len(pending)
+        if not apply or not pending:
+            return result
+
+        # 备份先于任何写入。备份失败 = 中止。
+        stamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        backup = f'{db_path}.bak-{stamp}'
+        suffix = 1
+        while os.path.exists(backup):
+            backup = f'{db_path}.bak-{stamp}-{suffix}'
+            suffix += 1
+        shutil.copy2(db_path, backup)
+        result['backup'] = backup
+
+        for new_path, file_id in pending:
+            conn.execute('UPDATE files SET file_path = ? WHERE id = ?',
+                         (new_path, file_id))
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
 def main(argv=None) -> int:
     """CLI: maintenance.py --scan | --migrate [--agent X]"""
     argv = argv if argv is not None else sys.argv[1:]
     agent = os.environ.get('MIDNIGHT_AGENT')
     action = None
+    apply = False
 
     i = 0
     while i < len(argv):
@@ -125,6 +192,12 @@ def main(argv=None) -> int:
             action = 'scan'
         elif arg == '--migrate':
             action = 'migrate'
+        elif arg == '--relativize-paths':
+            action = 'relativize'
+        elif arg == '--apply':
+            apply = True
+        elif arg == '--dry-run':
+            apply = False
         elif arg == '--agent' and i + 1 < len(argv):
             agent = argv[i + 1]
             i += 1
@@ -152,7 +225,14 @@ def main(argv=None) -> int:
         print(json.dumps({'status': 'ok', **result}, ensure_ascii=False))
         return 0
 
-    print("Usage: maintenance.py --scan | --migrate [--agent X]", file=sys.stderr)
+    if action == 'relativize':
+        import json
+        result = relativize_paths(agent, apply=apply)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get('status') == 'ok' else 1
+
+    print("Usage: maintenance.py --scan | --migrate [--agent X] | "
+          "--relativize-paths [--apply]", file=sys.stderr)
     return 1
 
 

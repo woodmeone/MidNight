@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(_SCRIPTS_DIR))     # 让 from scripts.xxx 可
 from schema import init_db  # noqa: E402
 from scripts.config import get_db_path, get_dailynote_path, ensure_agent  # noqa: E402
 from scripts.ngrams import content_ngrams  # noqa: E402
+from scripts.paths import stored_path  # noqa: E402
 from scripts.cache import bump_generation  # noqa: E402
 from scripts.tag_network import (  # noqa: E402
     DISTANCE_LAMBDA, FORWARD_DAMP, REVERSE_DAMP, MAX_REVERSE_RATIO,
@@ -117,16 +118,26 @@ def ingest_file(file_path: str, db_path: str, embedding_client, conn: Optional[s
 
     checksum = compute_checksum(content)
     abs_path = os.path.abspath(file_path)
+    # 落库存相对路径（Issue #11）：换机器/换用户名也能跟着 agent 目录走。
+    stored = stored_path(file_path, db_path)
 
     own_conn = conn is None
     if own_conn:
         conn = init_db(db_path)
 
     try:
-        # Check existing file record
+        # Check existing file record.
+        #
+        # 两次查：新库存相对路径，老库存绝对路径。只查相对会匹配不上老行，
+        # 于是把同一篇日记当新文件插第二次——这是本 Issue 最贵的错。
+        # 匹配到老行时**不顺手把它改成相对**：迁移是 maintenance 的活，不是 ingest 的。
         row = conn.execute(
-            "SELECT id, checksum FROM files WHERE file_path = ?", (abs_path,)
+            "SELECT id, checksum FROM files WHERE file_path = ?", (stored,)
         ).fetchone()
+        if not row and stored != abs_path:
+            row = conn.execute(
+                "SELECT id, checksum FROM files WHERE file_path = ?", (abs_path,)
+            ).fetchone()
         if row and row[1] == checksum:
             return {'status': 'skipped', 'file_id': row[0], 'chunks_count': 0}
 
@@ -147,7 +158,7 @@ def ingest_file(file_path: str, db_path: str, embedding_client, conn: Optional[s
             diary_date = parsed['created'][:10] if parsed['created'] else None
             cur = conn.execute(
                 "INSERT INTO files (file_path, diary_name, checksum, diary_date) VALUES (?, ?, ?, ?)",
-                (abs_path, parsed['maid'], checksum, diary_date)
+                (stored, parsed['maid'], checksum, diary_date)
             )
             file_id = cur.lastrowid
 

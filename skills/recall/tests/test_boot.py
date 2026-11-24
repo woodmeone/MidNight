@@ -1,0 +1,688 @@
+"""Tests for boot.py — 开机清单（Issue #9）.
+
+契约（见 .scratch/self-index/issues/01-boot-manifest.md）：
+- 两块：人设摘要 + 长期内容索引，中间一个空行
+- 不设字数上限，不裁剪；超 2000 字只在末尾追加提醒行
+- 三种情形：不可用 / 无 / 有类目
+- 只读：不建文件、不写库、不改 mtime
+"""
+import os
+import tempfile
+
+import pytest
+
+import scripts.config as cfg
+from scripts.boot import (
+    INDEX_FILENAME, check_index_paths, check_portability, classify_path,
+    compile_boot_manifest, main, scan_longterm,
+)
+from scripts.config import get_agent_dir, get_self_path
+from scripts.self_model import ensure_self
+
+
+@pytest.fixture
+def basedir():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        old_base = cfg.BASE_DIR
+        cfg.BASE_DIR = tmp
+        yield tmp
+        cfg.BASE_DIR = old_base
+
+
+@pytest.fixture
+def agent(basedir):
+    return 'kaibian'
+
+
+def _longterm(agent):
+    return os.path.join(get_agent_dir(agent), 'longterm')
+
+
+def _mkfile(path, content=''):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+def _self(agent, name='kaibian', style='第一性原理、克制', boundary='不收噪音'):
+    ensure_self(agent, defaults={
+        'name': name,
+        'anchor_tags': ['midnight'],
+        'mutable': {'persona_style': style, 'boundary': boundary},
+        'description': f'{name} 的身份锚。',
+    })
+
+
+# ============================================================
+# 票1：扫描 + 渲染
+# ============================================================
+
+def test_manifest_contains_identity_and_category(agent):
+    """有 self.md + longterm/tools/ 2 个文件 → 含 name 与 `tools 2`"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'b.py'))
+
+    out = compile_boot_manifest(agent)
+
+    assert 'kaibian' in out
+    assert 'tools 2' in out
+
+
+def test_zero_file_category_shown(agent):
+    """类目目录存在但为空 → 输出 `类目 0`，不消失"""
+    _self(agent)
+    os.makedirs(os.path.join(_longterm(agent), 'empty_cat'))
+
+    out = compile_boot_manifest(agent)
+
+    assert 'empty_cat 0' in out
+
+
+def test_index_file_is_relative(agent):
+    """索引路径必须是**相对**的；绝对路径只许出现在「根」那句里
+
+    绝对路径会被智能体照抄进自己的索引，搬机器即断（Issue #14）。
+    """
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
+    index = os.path.join(_longterm(agent), 'LONGTERM.md')
+    _mkfile(index, '# 索引\n')
+
+    out = compile_boot_manifest(agent)
+
+    assert 'LONGTERM.md' in out
+    assert '根 ' in out
+    # 索引指向必须是裸文件名，不能是绝对路径
+    assert f'→ {index}' not in out
+    assert f'→ {INDEX_FILENAME}' in out
+
+
+def test_root_shown_for_location(agent):
+    """「根」那句给的是定位信息，且确实是所在目录"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), '# 索引\n')
+
+    out = compile_boot_manifest(agent)
+
+    assert f'根 {_longterm(agent)}' in out
+
+
+def test_missing_longterm_reports_unavailable(agent):
+    """无 longterm 目录 → 含「不可用」与路径"""
+    _self(agent)
+    # 不建 longterm 目录
+
+    out = compile_boot_manifest(agent)
+
+    assert '不可用' in out
+    assert 'longterm' in out
+
+
+def test_empty_longterm_says_none(agent):
+    """目录存在但无子目录 → 含「无」"""
+    _self(agent)
+    os.makedirs(_longterm(agent))
+
+    out = compile_boot_manifest(agent)
+
+    assert '无' in out
+    assert '不可用' not in out
+
+
+def test_missing_self_degrades(agent):
+    """无 self.md → 不抛异常，含 `[开机] 我是{identity}`"""
+    assert not os.path.exists(
+        os.path.join(get_agent_dir(agent), 'self.md'))
+
+    out = compile_boot_manifest(agent)
+
+    assert f'[开机] 我是{agent}' in out
+
+
+def test_nested_subdir_counts_as_one_category(agent):
+    """kb/S1/x.md → 类目 `kb` 计数 1，不出现类目 `S1`"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'kb', 'S1', 'x.md'))
+
+    out = compile_boot_manifest(agent)
+
+    assert 'kb 1' in out
+    assert 'S1' not in out
+
+
+def test_categories_sorted(agent):
+    """建 z/、a/ → 输出里 a 在 z 前"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'z', 'f.md'))
+    _mkfile(os.path.join(_longterm(agent), 'a', 'f.md'))
+
+    out = compile_boot_manifest(agent)
+
+    assert out.index('a 1') < out.index('z 1')
+
+
+def test_deterministic(agent):
+    """连跑两次，输出逐字节相同"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
+    _mkfile(os.path.join(_longterm(agent), 'kb', 'b.md'))
+
+    assert compile_boot_manifest(agent) == compile_boot_manifest(agent)
+
+
+def test_workspace_root_priority(agent, tmp_path):
+    """--workspace 下有 LONGTERM.md → 用的是它（与 agent 目录的区分开）"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), 'agent\n')
+
+    ws = str(tmp_path / 'workspace')
+    _mkfile(os.path.join(ws, 'LONGTERM.md'), 'workspace\n')
+    _mkfile(os.path.join(ws, 'tools', 'a.py'))
+
+    out = compile_boot_manifest(agent, workspace=ws)
+
+    assert 'LONGTERM.md' in out
+    # 根是工作区，不是 agent 的 longterm 目录
+    assert f'根 {ws}' in out
+    assert f'根 {_longterm(agent)}' not in out
+
+
+def test_scan_longterm_returns_structure(agent):
+    """scan_longterm 返回 categories / index_file / unavailable"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
+
+    scan = scan_longterm([_longterm(agent)])
+
+    assert scan['categories'] == {'tools': 1}
+    assert scan['unavailable'] == []
+
+
+def test_scan_longterm_reports_unavailable(basedir):
+    """不存在的 root 进 unavailable，不进 categories"""
+    missing = os.path.join(basedir, 'nope')
+
+    scan = scan_longterm([missing])
+
+    assert scan['unavailable'] == [missing]
+    assert scan['categories'] == {}
+
+
+def test_loose_files_not_counted_as_category(agent):
+    """root 直接放的文件不计入类目（只能靠索引被发现）"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'loose.md'))
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
+
+    scan = scan_longterm([_longterm(agent)])
+
+    assert scan['categories'] == {'tools': 1}
+
+
+def test_hidden_dirs_skipped(agent):
+    """`.` 开头的隐藏目录不当类目"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), '.git', 'x'))
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
+
+    scan = scan_longterm([_longterm(agent)])
+
+    assert scan['categories'] == {'tools': 1}
+
+
+# ============================================================
+# 票2：CLI + 只读 + 超长提示
+# ============================================================
+
+def test_no_truncation_with_many_categories(agent):
+    """建 20 个类目 → 20 个全在输出里，一个不少（不裁剪是硬要求）"""
+    _self(agent)
+    for i in range(20):
+        _mkfile(os.path.join(_longterm(agent), f'cat{i:02d}', 'f.md'))
+
+    out = compile_boot_manifest(agent)
+
+    for i in range(20):
+        assert f'cat{i:02d} 1' in out
+
+
+def test_long_output_appends_hint(agent):
+    """清单 >2000 字 → 末尾含提醒，且内容未被裁剪"""
+    _self(agent)
+    # 造足够多的类目让输出超阈值
+    for i in range(120):
+        _mkfile(os.path.join(_longterm(agent), f'category_with_a_long_name_{i:03d}', 'f.md'))
+
+    out = compile_boot_manifest(agent)
+
+    assert 'token 和上下文都很宝贵' in out
+    # 内容未被裁剪：第一个和最后一个类目都还在
+    assert 'category_with_a_long_name_000 1' in out
+    assert 'category_with_a_long_name_119 1' in out
+
+
+def test_readonly_no_mtime_change(agent):
+    """跑前后 longterm 下所有文件 mtime 完全一致"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'b.py'))
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), '# x\n')
+
+    before = {
+        p: os.stat(p).st_mtime_ns
+        for p in [
+            os.path.join(_longterm(agent), 'tools', 'a.py'),
+            os.path.join(_longterm(agent), 'tools', 'b.py'),
+            os.path.join(_longterm(agent), 'LONGTERM.md'),
+        ]
+    }
+
+    compile_boot_manifest(agent)
+
+    after = {p: os.stat(p).st_mtime_ns for p in before}
+    assert before == after
+
+
+def test_cli_requires_identity():
+    """无参数 → 返回 2"""
+    assert main([]) == 2
+
+
+def test_cli_prints_manifest(agent, capsys):
+    """正常调用 → stdout 含 `[开机]`，退出码 0"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'tools', 'a.py'))
+
+    rc = main(['--identity', agent])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '[开机]' in out
+
+
+# ============================================================
+# 票2：--check 扫索引里的绝对路径（Issue #14）
+# ============================================================
+
+def test_check_finds_windows_drive(agent):
+    """root 内的绝对路径 → kind='inside'，必须修"""
+    _self(agent)
+    inside = os.path.join(_longterm(agent), 'tools', 'b.py')
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            f'# 索引\n- tools/a.py\n- {inside}\n')
+
+    findings = check_index_paths(_longterm(agent))
+
+    assert len(findings) == 1
+    assert findings[0]['line'] == 3
+    assert findings[0]['kind'] == 'inside'
+    assert 'b.py' in findings[0]['path']
+
+
+def test_check_outside_root_is_advisory(agent):
+    """root 外的绝对路径 → kind='outside'，不算必须修（外部真源指路）"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- D:\\OtherProject\\src\n- C:\\Users\\me\\skills\n')
+
+    findings = check_index_paths(_longterm(agent))
+
+    assert len(findings) == 2
+    assert all(f['kind'] == 'outside' for f in findings)
+
+
+def test_check_finds_posix_absolute(agent):
+    """POSIX 绝对路径同样被抓"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- /home/user/ws/tools/a.py\n')
+
+    findings = check_index_paths(_longterm(agent))
+
+    assert len(findings) == 1
+    assert '/home/' in findings[0]['path']
+
+
+def test_check_finds_file_protocol(agent):
+    """file:// 协议也算绝对"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- file:///C:/x/a.py\n')
+
+    findings = check_index_paths(_longterm(agent))
+
+    assert len(findings) == 1
+
+
+def test_check_clean_index(agent):
+    """全是相对路径 → 无发现"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '# 索引\n- tools/a.py\n- kb/S1.md\n')
+
+    assert check_index_paths(_longterm(agent)) == []
+
+
+def test_check_missing_index(agent):
+    """无索引文件 → 返回 None（区别于「干净」的 []）"""
+    _self(agent)
+    os.makedirs(_longterm(agent))
+
+    assert check_index_paths(_longterm(agent)) is None
+
+
+def test_check_cli_reports_and_exit_zero(agent, capsys):
+    """--check 默认退出码 0（这是检查不是断言），输出含行号"""
+    _self(agent)
+    inside = os.path.join(_longterm(agent), 'tools', 'b.py')
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), f'- {inside}\n')
+
+    rc = main(['--identity', agent, '--check'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '路径体检' in out
+    assert '第 1 行' in out
+
+
+def test_check_strict_exit_one(agent):
+    """--check --strict + root 内有绝对路径 → 退出码 1"""
+    _self(agent)
+    inside = os.path.join(_longterm(agent), 'tools', 'b.py')
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), f'- {inside}\n')
+
+    assert main(['--identity', agent, '--check', '--strict']) == 1
+
+
+def test_check_strict_ignores_outside(agent):
+    """--strict 不因外部真源指路而失败（那是合理写法）"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- D:\\OtherProject\\src\n')
+
+    rc = main(['--identity', agent, '--check', '--strict'])
+    assert rc == 0
+
+
+def test_check_strict_clean_exit_zero(agent):
+    """--strict 且干净 → 退出码 0"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'), '- tools/a.py\n')
+
+    assert main(['--identity', agent, '--check', '--strict']) == 0
+
+
+def test_check_ignores_prose_slash(agent):
+    """「和/或」这类不误判成 POSIX 绝对路径"""
+    _self(agent)
+    _mkfile(os.path.join(_longterm(agent), 'LONGTERM.md'),
+            '- 读和/或写都要走库\n- 客户/供应商两边都记\n')
+
+    assert check_index_paths(_longterm(agent)) == []
+
+
+# ============================================================
+# 票 #16：paths 要被显示出来
+# ============================================================
+
+def test_identity_shows_paths_hint(agent):
+    """self.md 有 paths → 含固定占位串"""
+    ensure_self(agent)   # DEFAULT_TEMPLATE 自带 paths
+    os.makedirs(_longterm(agent))
+
+    out = compile_boot_manifest(agent)
+    first = out.splitlines()[0]
+
+    assert '路径:先查技能库·有事问同伴' in first
+
+
+def test_identity_omits_paths_when_absent(agent):
+    """无 paths → 不含 `路径:`，且不留空 `｜`"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {'persona_style': '克制'},
+        'description': 'x',
+    })
+    os.makedirs(_longterm(agent))
+
+    first = compile_boot_manifest(agent).splitlines()[0]
+
+    assert '路径:' not in first
+    assert not first.endswith('｜')
+    assert '｜｜' not in first
+
+
+def test_paths_hint_is_fixed_string(agent):
+    """无论 paths 内容多长，输出里都是那句固定串（不截取内容）"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {
+            'paths': ['这是一条极长的路径说明' * 50],
+        },
+        'description': 'x',
+    })
+    os.makedirs(_longterm(agent))
+
+    first = compile_boot_manifest(agent).splitlines()[0]
+
+    assert '路径:先查技能库·有事问同伴' in first
+    assert '极长的路径说明' not in first     # 不展开内容
+
+
+def test_show_paths_prints_full_content(agent, capsys):
+    """--show-paths 打印 paths 原文"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {'paths': ['第一句指路', '第二句指路']},
+        'description': 'x',
+    })
+
+    rc = main(['--identity', agent, '--show-paths'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '第一句指路' in out
+    assert '第二句指路' in out
+
+
+def test_show_paths_absent(agent, capsys):
+    """无 paths → 明确说未设置，退 0"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {},
+        'description': 'x',
+    })
+
+    rc = main(['--identity', agent, '--show-paths'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '未设置' in out
+
+
+# ============================================================
+# 票 #15：路径可移植性三级判据
+# ============================================================
+
+def test_classify_inside(agent):
+    """agent 目录内的路径 → inside"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm', 'tools', 'a.py')
+
+    assert classify_path(inside, get_agent_dir(agent)) == 'inside'
+
+
+def test_classify_home_windows(agent):
+    """C:\\Users\\X\\.dsh\\skills → home"""
+    home_path = os.path.join(os.path.expanduser('~'), '.dsh', 'skills')
+    if not os.path.isabs(home_path):        # 兜底：某些环境 ~ 不展开
+        pytest.skip('home 不可解析')
+    assert classify_path(home_path, get_agent_dir(agent)) == 'home'
+
+
+def test_classify_home_tilde(agent):
+    """已经是 ~/ 写法 → None（可移植，不该报）"""
+    assert classify_path('~/.dsh/skills', get_agent_dir(agent)) is None
+
+
+def test_classify_external(agent):
+    """别的盘 → external"""
+    assert classify_path('D:\\Project\\Other', get_agent_dir(agent)) == 'external'
+
+
+def test_classify_relative_is_never_absolute(agent):
+    """相对路径 → None（不需要判级）"""
+    assert classify_path('longterm/tools/a.py', get_agent_dir(agent)) is None
+
+
+def test_check_scans_self_md(agent):
+    """self.md 的 mutable 里有绝对路径 → 报出"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm')
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {'paths': [f'我的长期内容在 {inside}']},
+        'description': 'x',
+    })
+
+    findings = check_portability(agent)
+
+    assert findings
+    assert any(f['kind'] == 'inside' for f in findings)
+    assert all(f['source'] == 'self.md' for f in findings)
+
+
+def test_check_scans_agent_json(agent):
+    """agent.json 里有绝对路径 → 报出"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {}, 'description': 'x',
+    })
+    with open(os.path.join(get_agent_dir(agent), 'agent.json'), 'w',
+              encoding='utf-8') as f:
+        f.write('{"name": "kaibian", "description": "项目在 D:\\\\Project\\\\AIRPCreate"}')
+
+    findings = check_portability(agent)
+
+    assert any(f['source'] == 'agent.json' for f in findings)
+    assert any(f['kind'] == 'external' for f in findings)
+
+
+def test_check_scans_longterm_index(agent):
+    """LONGTERM.md 里有绝对路径 → 报出"""
+    ensure_self(agent)
+    inside = os.path.join(get_agent_dir(agent), 'longterm')
+    _mkfile(os.path.join(inside, 'LONGTERM.md'),
+            f'# 索引\n- {inside}\\tools\\a.py\n')
+
+    findings = check_portability(agent)
+
+    assert any(f['source'] == 'LONGTERM.md' for f in findings)
+
+
+def test_check_decodes_json_escapes(agent):
+    """JSON 双反斜杠 C:\\\\Users\\\\... 能正确识别成一条，不重复计数"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm')
+    escaped = inside.replace('\\', '\\\\')
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {}, 'description': 'x',
+    })
+    # 手工写一份带转义的 self.md
+    with open(get_self_path(agent), 'w', encoding='utf-8') as f:
+        f.write('---\nname: kaibian\n'
+                f'mutable: {{"paths": ["在 {escaped} 里"]}}\n---\n正文\n')
+
+    findings = check_portability(agent)
+
+    paths = [f['path'] for f in findings]
+    assert len(paths) == 1, f'转义导致重复计数：{paths}'
+    assert '\\\\' not in paths[0]
+
+
+def test_report_shows_rewrite_suggestion(agent, capsys):
+    """报告给出「原值 → 建议值」"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm', 'tools')
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': [f'内容在 {inside}']}, 'description': 'x',
+    })
+
+    rc = main(['--identity', agent, '--check'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert '→' in out                # 建议重写
+    assert '该修' in out
+
+
+def test_strict_fails_on_inside(agent):
+    """有 inside → --strict 退 1"""
+    inside = os.path.join(get_agent_dir(agent), 'longterm')
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': [inside]}, 'description': 'x',
+    })
+
+    assert main(['--identity', agent, '--check', '--strict']) == 1
+
+
+def test_strict_fails_on_home(agent):
+    """有 home（写成 C:\\Users\\X\\...）→ --strict 也退 1（写 ~ 就能搬）"""
+    home_path = os.path.join(os.path.expanduser('~'), '.dsh', 'skills')
+    if not os.path.isabs(home_path):
+        pytest.skip('home 不可解析')
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': [home_path]}, 'description': 'x',
+    })
+
+    assert main(['--identity', agent, '--check', '--strict']) == 1
+
+
+def test_strict_passes_on_external(agent):
+    """只有 external → --strict 退 0"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': ['D:\\Project\\Other']}, 'description': 'x',
+    })
+
+    assert main(['--identity', agent, '--check', '--strict']) == 0
+
+
+def test_check_readonly(agent):
+    """跑完 self.md / agent.json mtime 不变"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian', 'anchor_tags': ['midnight'],
+        'mutable': {'paths': ['~/.dsh/skills']}, 'description': 'x',
+    })
+    files = [get_self_path(agent),
+             os.path.join(get_agent_dir(agent), 'agent.json')]
+    files = [p for p in files if os.path.exists(p)]
+    before = {p: os.stat(p).st_mtime_ns for p in files}
+
+    check_portability(agent)
+
+    after = {p: os.stat(p).st_mtime_ns for p in before}
+    assert before == after
+
+
+def test_identity_omits_missing_style_and_boundary(agent):
+    """style / boundary 缺失时整段省略，不留空 `｜`"""
+    ensure_self(agent, defaults={
+        'name': 'kaibian',
+        'anchor_tags': ['midnight'],
+        'mutable': {},
+        'description': 'x',
+    })
+    os.makedirs(_longterm(agent))
+
+    out = compile_boot_manifest(agent)
+    first = out.splitlines()[0]
+
+    assert first == '[开机] 我是kaibian'
+    assert '｜' not in first
