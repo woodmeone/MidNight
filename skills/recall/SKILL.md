@@ -320,7 +320,27 @@ python boot.py --identity <我的名字> [--workspace <当前工作区>]
 
 **每次会话开工前，AI 必须先确定"我是谁"，然后全会话的写/查都显式绑到自己的记忆区。** 这是隔离墙的第一道守卫：
 
-1. **声明身份**：会话开始时识别本 AI 的角色名（如 `qinglan`=主助理、`mira`=社交管家）。
+1. **声明身份 —— 只从用户消息里读，不看别处**：
+
+   用户消息只要以 `/recall <name>` 开头，`<name>` 就是本次会话的**唯一身份**，
+   全会话所有 `--identity` / `--agent` 一律用它，一次定下、不再改：
+
+   ```bash
+   python boot.py --identity <name>                    # 开机：人设 + 长期内容
+   python prep.py --message "..." --identity <name>    # 每轮：联想召回
+   # 写日记 → ~/.midnight/recall/<name>/dailynote/
+   ```
+
+   **不要从别处取身份**。最常犯的那个错：去看 harness 的 `runtime-context`
+   里那句 `Your name is "<某个名字>"`，然后拿它当身份。
+
+   > 那句话是 **agent 树内部的地址簿**（根 agent 的呼叫名，如 `lead`），
+   > 只用于 `send_message` 寻址和 `list_agents` 显示，**与本记忆区毫无关系**。
+   > 两者重名纯属巧合——改它没用（它写死在宿主源码里），认它才是错。
+
+   **用户没给名字时**，才落到默认槽位（harness 报的那个名字，通常是 `lead`）。
+   判据一句话：**用户说了名字 → 用用户的；用户没说 → 才用默认。**
+
 2. **开户（可选）**：若这是一个新智能体，先 `python recall.py --register '<身份描述>' --identity <名字>` 立身份、建记忆区。
 3. **写日记用 `--agent`**：`python ingest.py --agent <我的名字> <日记路径>`（会自动开户）。
 4. **召回用 `--identity <我的名字>`**：`python recall.py --query "..." --identity <我的名字> --k 10`（也会自动开户）。
@@ -329,8 +349,9 @@ python boot.py --identity <我的名字> [--workspace <当前工作区>]
 > **身份即开户**：只要显式给出 `--identity/--agent/--register <名字>`，recall 就会自动为该智能体建目录 + agent.json，
 > 立即出现在 `list_agents()` 中——无需先写过日记。`default` 是兜底槽位，不会生成身份文件。
 
-> 原理（第一性）：身份是会话持有者（上层 AI）声明的事实，不是该由 embedding 去猜的东西。
-> `--identity` 让召回永远落在自己区；只有从未声明身份时，auto 的字面锚定兜底才接管。
+> 原理（第一性）：身份是**用户声明**的事实（`/recall <name>` 里那个名字），
+> 既不是该由 embedding 去猜的东西，也不是从宿主 `runtime-context` 抄来的东西。
+> `--identity` 让召回永远落在指定区；只有用户从未给过名字时，才落默认槽位。
 
 ## 召回调用
 

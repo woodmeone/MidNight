@@ -340,3 +340,65 @@ def test_skill_md_states_boot_once(skill):
             assert 'boot.py' not in line, (
                 f'boot.py 不许出现在「每次回复前」——会每轮重烧开机清单：{line!r}'
             )
+
+
+# ============================================================
+# 6. 身份绑定：只从用户消息读，不认宿主 runtime-context
+# ============================================================
+
+def test_identity_comes_from_user_message_only(skill):
+    """身份的来源必须写死成「/recall <name> 里那个名字」。
+
+    回归背景：2026-11-24，用户说「/recall 开编」，我跑去读宿主注入的
+    `runtime-context`（里面写死 `Your name is "lead"`），把宿主地址簿
+    当成了身份，整场活写进了 lead 记忆区。
+
+    所以这里断言的不是「有身份绑定这一节」——那一节一直都有。
+    断言的是**「不许从哪儿取身份」这个反面约束必须写明**。
+    """
+    assert '## 身份绑定' in skill
+    start = skill.index('## 身份绑定')
+    end = skill.find('## 召回调用', start)
+    segment = skill[start:end]
+
+    # 正面：用户消息是唯一来源
+    assert '/recall <name>' in segment, (
+        '身份绑定段必须写明身份来自 `/recall <name>`'
+    )
+    assert '用户说了名字' in segment, (
+        '必须有「用户说了名字 → 用用户的」这条判据'
+    )
+
+    # 反面：必须点名 runtime-context 这个陷阱
+    assert 'runtime-context' in segment, (
+        '必须点名 harness 的 runtime-context 不是身份来源——'
+        '不写这句，下次还会有人（包括 AI 自己）去那儿取身份'
+    )
+    assert '不要从别处取身份' in segment, (
+        '必须有明确的「不要从别处取身份」禁令'
+    )
+
+
+def test_identity_segment_explains_the_name_collision(skill):
+    """必须解释「重名纯属巧合」，否则读者会以为改了宿主常量就能换身份。
+
+    实测：`ROOT_AGENT_NAME = 'lead'` 是宿主源码里的常量，改它需要改
+    node_modules（升级即丢），而且它只管 agent 树寻址，与记忆区无关。
+    """
+    start = skill.index('## 身份绑定')
+    end = skill.find('## 召回调用', start)
+    segment = skill[start:end]
+
+    assert '巧合' in segment, '必须点明两个 `lead` 重名是巧合，不是同一个东西'
+    assert '地址簿' in segment, '必须解释宿主那个名字只是 agent 树内部地址簿'
+
+
+def test_identity_default_requires_no_user_name(skill):
+    """默认槽位只能在「用户没给名字」时启用——顺序不能反。"""
+    start = skill.index('## 身份绑定')
+    end = skill.find('## 召回调用', start)
+    segment = skill[start:end]
+
+    assert '用户没给名字时' in segment or '用户没给名字' in segment, (
+        '必须写明默认槽位的启用条件'
+    )

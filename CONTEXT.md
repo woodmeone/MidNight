@@ -61,6 +61,9 @@
 | **退休（retire）** | 长期内容移进 `<工作区>/archive/` 的动作。**不删除**——只是不再出现在索引和开机清单里。判据是「打开索引时你自己都想不起来它是什么了」 |
 | **相对路径（relocatable path）** | 路径的可迁移口径，**三级**：① `inside`——落在 agent 目录内，写相对（`longterm/`）；② `home`——落在用户目录下，写 `~/` 开头；③ `external`——别的盘/别人的项目，只能绝对但标注「外部真源」。判据一句话：**这段路径跟着谁搬家？** 已是 `~/` 写法的不再报。**技能库位置由 harness 运行时提供，不写进文档常量** |
 | **路径体检（path check）** | `boot.py --check`：扫 `self.md` / `agent.json` / `LONGTERM.md` 三处载体的绝对路径，按三级分类，给「原值 → 建议值」。**只报不改**——载体是智能体自己的认知，改不改由它决定。`--strict` 在 inside/home 时退 1，`--all` 扫全部 agent |
+| **记忆身份（memory identity）** | recall 的 `--identity` / `--agent` 参数值，决定读哪个库、写哪个 `dailynote/`。**来源唯一**：用户消息里 `/recall <name>` 的那个 `<name>`。这是隔离墙的钥匙 |
+| **宿主身份（host identity）** | 宿主（DSH）给根 agent 的呼叫名，写死在源码常量（`ROOT_AGENT_NAME = "lead"`），经 `runtime-context` 注入成 `Your name is "<名字>"`。**只用于 agent 树内部寻址**（`send_message` / `list_agents`），与记忆区无代码关联。改它需要改 `node_modules`，升级即丢——**不是身份的正确入口** |
+| **地址簿名字** | 对「宿主身份」的别称，强调它只是"谁能呼叫谁"的登记，不是"谁是谁"。两者与记忆区同名是**巧合**，不是同一个东西 |
 
 ---
 
