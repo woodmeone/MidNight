@@ -61,6 +61,11 @@ recall 内部模块分工：
 ## 必须遵守的约束
 
 - **记忆物理隔离**：一区一库，跨区读写禁止；auto 猜库不得戳破隔离墙。
+- **身份只从用户消息读**：用户消息以 `/recall <name>` 开头时，`<name>` 就是会话唯一身份，
+  全会话 `--identity` / `--agent` 一律用它。**禁止从宿主 `runtime-context` 取身份**
+  ——那里面的 `Your name is "<名字>"` 是宿主 agent 树的地址簿（源码常量，只用于
+  `send_message` 寻址与 `list_agents` 显示），与本记忆区无代码关联，两者重名是巧合。
+  默认槽位只在用户没给名字时启用。自查：`tests/test_skill_contract.py::test_identity_*`。
 - **检索只走库**（ADR-0002）：检索索引唯一载体是 `recall.db`；`dailynote/*.md` 只作 ingest 源，禁止作为检索回退路径；确定性通道必须显式带身份，不许静默落到 env/default 库。
 - **非破坏铁律**：任何维护/演化操作只 UPDATE 既有字段与边，绝不删除、重建、重灌记忆数据；动真实库前先备份。
 - **路径相对化**：`files.file_path` 存相对 agent 目录的路径（正斜杠），库里不存盘符与用户名；
